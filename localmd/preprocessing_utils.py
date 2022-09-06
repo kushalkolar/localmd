@@ -6,7 +6,6 @@ from jax import jit, vmap
 import functools
 from functools import partial
 
-
 @partial(jit)
 def get_noise_estimate(trace):
     output_welch = jax.scipy.signal.welch(trace, noverlap=128)
@@ -20,27 +19,35 @@ def get_noise_estimate(trace):
     return sum_values / (end - start)
 
 
-get_noise_estimate_vmap = jit(vmap(get_noise_estimate, in_axes=(0)))
-
 @partial(jit)
 def get_mean(trace):
-    return jnp.mean(trace, axis = 1)
+    return jnp.mean(trace)
 
 @partial(jit)
-def sum_and_normalize(trace, normalizer):
-    return jnp.sum(trace, axis = -1) / normalizer
+def center(trace):
+    mean = get_mean(trace)
+    return trace - mean
 
+center_vmap = vmap(center, in_axes=(0))
 
 @partial(jit)
-def center_and_get_noise_estimate(trace, mean):
+def center_and_noise_normalize(trace):
+    mean = get_mean(trace)
     centered_trace = trace - mean
-    return get_noise_estimate(centered_trace)
+    noise_est = get_noise_estimate(centered_trace)
+    return centered_trace / noise_est
 
-center_and_get_noise_estimate_vmap = jit(vmap(center_and_get_noise_estimate, in_axes=(0,0)))
+center_and_noise_normalize_vmap = jit(vmap(center_and_noise_normalize, in_axes=(0)))
 
 
 @partial(jit)
-def standardize_data(data, mean, std):
-    centered = data - mean
-    standardized = centered / std
-    return standardized
+def standardize_block(block):
+    '''
+    Input: 
+        block: jnp.array. Dimensions (d1, d2, T)
+    '''
+    d1, d2, T = block.shape
+    block_2d = jnp.reshape(block, (d1*d2, T), order="F")
+    updated_2d = center_and_noise_normalize_vmap(block_2d)
+    updated_3d = jnp.reshape(updated_2d, (d1, d2, T), order="F")
+    return updated_3d

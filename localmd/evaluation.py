@@ -1,6 +1,19 @@
 """
-File for all penalties related to total variation and trend filtering
-"""@partial(jit)
+File for all evaluation metrics and functionality related to total variation and trend filtering
+"""
+import jax
+import jax.scipy
+import jax.numpy as jnp
+import jax.numpy as jnp
+from jax import jit, vmap
+import functools
+from functools import partial
+
+import numpy as np
+
+
+
+@partial(jit)
 def l1_norm(data):
     '''
     Calculates the overall l1 norm of the data
@@ -28,6 +41,7 @@ def trend_filter_stat(trace):
     combined_mat = center * 2 - left_side - right_side
     combined_mat = jnp.abs(combined_mat)
     return jnp.sum(combined_mat)
+
 
 @partial(jit)
 def total_variation_stat(img):
@@ -98,7 +112,12 @@ def temporal_roughness_stat(trace):
     return numerator/denominator
 
 spatial_roughness_stat_vmap = jit(vmap(spatial_roughness_stat, in_axes=(2)))
-temporal_roughness_stat_vmap = vmap(temporal_roughness_stat, in_axes=(1))
+temporal_roughness_stat_vmap = vmap(temporal_roughness_stat, in_axes=(0))
+
+@partial(jit)
+def get_roughness_stats(img, trace):
+    spatial_stat = spatial_roughness_stat(img)
+    temporal_stat = temporal_roughness_stat(trace)
 
 @partial(jit)
 def evaluate_fitness(img, trace, spatial_thres, temporal_thres):
@@ -201,9 +220,4 @@ def manage_successive_failures_iteration(k, input_pytree):
     start = output_pytree[1]
     
     return (consec_failures, start, my_list, max_consec_failures)
-    
-    
-    
 
-    
-    
