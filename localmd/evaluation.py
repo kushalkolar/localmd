@@ -93,6 +93,7 @@ def spatial_roughness_stat(img):
         stat: float. spatial roughness statistic
     
     '''
+    img = img / jnp.linalg.norm(img)
     numerator = total_variation_stat(img)
     denominator = l1_norm(img)
     return numerator/denominator
@@ -106,7 +107,7 @@ def temporal_roughness_stat(trace):
         stat: float. temporal roughness statistic statistic
     
     '''
-
+    trace = trace / jnp.linalg.norm(trace)
     numerator = trend_filter_stat(trace)
     denominator = l1_norm(trace)
     return numerator/denominator

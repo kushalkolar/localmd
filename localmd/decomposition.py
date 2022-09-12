@@ -128,6 +128,20 @@ def iterative_rank_1_approx(test_data):
     
     return final_pytree
 
+
+@partial(jit)
+def truncated_random_svd(input_matrix, random_data):
+    desired_rank = random_data.shape[1]
+    projected = jnp.matmul(input_matrix, random_data)
+    Q, R = jnp.linalg.qr(projected)
+    B = jnp.matmul(Q.T, input_matrix)
+    U, s, V = jnp.linalg.svd(B, full_matrices=False)
+    
+    U_final = Q.dot(U)
+    V = jnp.multiply(jnp.expand_dims(s, axis=1), V)
+    return [U_final, V]
+
+
 @partial(jit)
 def iterative_rank_1_approx_sims(test_data):
     num_iters = 3
@@ -139,6 +153,23 @@ def iterative_rank_1_approx_sims(test_data):
     
     return final_pytree
 
+
+
+@partial(jit)
+def decomposition_no_normalize_approx(block, random_projection_mat):
+    d1, d2, T = block.shape
+    block_2d = jnp.reshape(block, (d1*d2, T), order="F")
+    decomposition = truncated_random_svd(block_2d, random_projection_mat)
+    
+    u_mat, v_mat = decomposition[0], decomposition[1]
+    u_mat = jnp.reshape(u_mat, (d1, d2, u_mat.shape[1]), order="F")
+    
+    spatial_statistics = spatial_roughness_stat_vmap(u_mat)
+    temporal_statistics = temporal_roughness_stat_vmap(v_mat)
+
+    return spatial_statistics, temporal_statistics
+
+decomposition_no_normalize_approx_vmap = jit(vmap(decomposition_no_normalize_approx, in_axes = (3, 2)))
 
 
 @partial(jit)
@@ -157,11 +188,12 @@ def decomposition_no_normalize(block):
 
 decomposition_no_normalize_vmap = jit(vmap(decomposition_no_normalize, in_axes = (3)))
 
-def threshold_heuristic(block_sizes, iters=10, num_sims=5):
+def threshold_heuristic(block_sizes, num_comps = 3, iters=10, num_sims=5, percentile_threshold = 5):
     '''
     We simulate the roughness statistics for components when we fit to standard normal noise
     Inputs: 
         block_sizes: tuple, dimensions of block: d1, d2, T, where d1 and d2 are the dimensions of the block on the FOV and T is the window length
+        num_comps: positive integer. Number of components we fit for each (0,1)-random noise dataset
         iters: default parameter, int. Number of times we do this procedure on the GPU. This param is really to avoid memorry blowups on the GPU
         num_sims: default parameter, int. 
     Outputs: 
@@ -173,8 +205,9 @@ def threshold_heuristic(block_sizes, iters=10, num_sims=5):
 
     for j in range(iters):
         noise_data = np.random.randn(d1, d2, T, num_sims)
+        random_projection = np.random.randn(T, num_comps, num_sims)
 
-        results = decomposition_no_normalize_vmap(noise_data)
+        results = decomposition_no_normalize_approx_vmap(noise_data, random_projection)
 
         spatial_temp = results[0].reshape((-1,))
         temporal_temp = results[1].reshape((-1,))
@@ -182,41 +215,15 @@ def threshold_heuristic(block_sizes, iters=10, num_sims=5):
         spatial_cumulator = np.concatenate([spatial_cumulator, spatial_temp])
         temporal_cumulator = np.concatenate([temporal_cumulator, temporal_temp])
 
-    spatial_thres = np.percentile(spatial_cumulator.flatten(), 5)
-    temporal_thres = np.percentile(temporal_cumulator.flatten(), 5)
+    spatial_thres = np.percentile(spatial_cumulator.flatten(), percentile_threshold)
+    temporal_thres = np.percentile(temporal_cumulator.flatten(), percentile_threshold)
     
     return spatial_thres, temporal_thres
 
 
 
-
 @partial(jit)
-def single_block_md(block, spatial_thres, temporal_thres, max_consec_failures):
-    block = standardize_block(block) #Center and divide by noise standard deviation before doing matrix decomposition
-    d1, d2, T = block.shape
-    block_2d = jnp.reshape(block, (d1*d2, T), order="F")
-    
-    
-    
-    decomposition = iterative_rank_1_approx(block_2d)
-    u_mat, v_mat = decomposition[1], decomposition[2]
-    u_mat = jnp.reshape(u_mat, (d1, d2, u_mat.shape[1]), order="F")
-    
-
-    
-    ##Now we begin the evaluation phase
-    good_comps = construct_final_fitness_decision(u_mat, v_mat.T, spatial_thres,\
-                                                  temporal_thres, max_consec_failures)
-    
-    u_mat = jnp.reshape(u_mat, (d1*d2, -1), order="F")
-    
-    good_comps_expanded = jnp.expand_dims(good_comps, axis=0)
-    u_mat_filtered = u_mat * good_comps_expanded
-    Q, R = jnp.linalg.qr(u_mat_filtered, mode="reduced")
-    return jnp.reshape(Q, (d1, d2, -1), order="F")
-
-@partial(jit)
-def single_block_md_new(block, spatial_thres, temporal_thres, max_consec_failures):
+def single_block_md(block, projection_data, spatial_thres, temporal_thres, max_consec_failures):
     #TODO: Get rid of max consec failures entirely from function API 
     block = standardize_block(block) #Center and divide by noise standard deviation before doing matrix decomposition
     d1, d2, T = block.shape
@@ -224,8 +231,8 @@ def single_block_md_new(block, spatial_thres, temporal_thres, max_consec_failure
     
     
     
-    decomposition = iterative_rank_1_approx(block_2d)
-    u_mat, v_mat = decomposition[1], decomposition[2]
+    decomposition = truncated_random_svd(block_2d, projection_data)
+    u_mat, v_mat = decomposition[0], decomposition[1]
     u_mat = jnp.reshape(u_mat, (d1, d2, u_mat.shape[1]), order="F")
     
 
@@ -235,6 +242,6 @@ def single_block_md_new(block, spatial_thres, temporal_thres, max_consec_failure
                                                   temporal_thres, max_consec_failures)
     
     u_mat = jnp.reshape(u_mat, (d1*d2, -1), order="F")
-    return u_mat, good_comps
+    return u_mat, good_comps, v_mat
 
-single_block_md_new_vmap = jit(vmap(single_block_md_new, in_axes=(3, None, None, None)))
+single_block_md_vmap = jit(vmap(single_block_md, in_axes=(3,2, None, None, None)))
