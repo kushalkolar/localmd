@@ -4,12 +4,29 @@ import jax.numpy as jnp
 from jax import jit, vmap
 import functools
 from functools import partial
+import time
+import scipy
+import scipy.sparse
 
 import jaxopt
 import numpy as np
 
 from localmd.evaluation import spatial_roughness_stat_vmap, temporal_roughness_stat_vmap, construct_final_fitness_decision
 from localmd.preprocessing_utils import standardize_block
+from localmd.tiff_loader import tiff_loader
+
+import sys
+import datetime
+import os
+
+def display(msg):
+    """
+    Printing utility that logs time and flushes.
+    """
+    tag = '[' + datetime.datetime.today().strftime('%y-%m-%d %H:%M:%S') + ']: '
+    sys.stdout.write(tag + msg + '\n')
+    sys.stdout.flush()
+
 
 @partial(jit)
 def objective_function(X, placeholder, data):
@@ -252,6 +269,16 @@ def single_block_md(block, projection_data, spatial_thres, temporal_thres, max_c
 
 single_block_md_vmap = jit(vmap(single_block_md, in_axes=(3,2, None, None, None)))
 
+def get_projector(U):
+    #TODO: Use Pytorch_sparse to accelerate the matmul on GPU/TPU... (may be overkill)
+    final_matrix_r_sparse = scipy.sparse.coo_matrix(U)
+    prod = (final_matrix_r_sparse.T.dot(final_matrix_r_sparse)).toarray()
+    theta = np.linalg.inv(prod)
+    projector = (final_matrix_r_sparse.dot(theta.T)).T #Do it like this to take advantage of sparsity using scipy not np
+    return projector
+
+
+
 def factored_svd(spatial_components, temporal_components):
     """
     Given a matrix factorization M=UQ (with U sparse) factorizes Q = RSVt so
@@ -276,3 +303,103 @@ def factored_svd(spatial_components, temporal_components):
     temporal_basis = eig_vecs.T.dot(Qt.T)
 
     return mixing_weights, singular_values, temporal_basis  # R, s, Vt
+
+
+def localmd_decomposition(filename, block_sizes, overlap, frame_range, max_components=50, sim_conf=5):
+    load_obj = tiff_loader(filename, dtype='float64', center=True, normalize=True, background_rank=0)
+    start = frame_range[0]
+    end = frame_range[1]
+    end = min(end, load_obj.shape[2])
+    frames = [i for i in range(start, end)]
+    block_sizes = block_sizes
+    overlap = overlap
+    
+    ##Step 2a: Get the spatial and temporal thresholds
+    display("Running Simulations")
+    spatial_thres, temporal_thres = threshold_heuristic([block_sizes[0], block_sizes[1], len(frames)], num_comps = 1, iters=25, num_sims = 10, percentile_threshold=sim_conf)
+    
+    ##Step 2b: Load the data you will do blockwise SVD on
+    display("Loading Data")
+    data = load_obj.temporal_crop_standardized(frames)
+    
+    ##Step 2c: Run PMD and get the U matrix
+    display("Obtaining blocks")
+    cumulator = []
+
+    start_t = time.time()
+
+    pairs = []
+
+    dim_1_iters = list(range(0, data.shape[0] - block_sizes[0] + 1, block_sizes[0] - overlap[0]))
+    if dim_1_iters[-1] != data.shape[0] - block_sizes[0] and data.shape[0] - block_sizes[0] != 0:
+        dim_1_iters.append(data.shape[0] - block_sizes[0])
+
+    dim_2_iters = list(range(0, data.shape[1] - block_sizes[1] + 1, block_sizes[1] - overlap[1]))
+    if dim_2_iters[-1] != data.shape[1] - block_sizes[1] and data.shape[1] - block_sizes[1] != 0:
+        dim_2_iters.append(data.shape[1] - block_sizes[1])
+
+    for k in dim_1_iters:
+        for j in dim_2_iters:
+            pairs.append((k, j))
+            subset = data[k:k+block_sizes[0], j:j+block_sizes[1], :]
+            cumulator.append(subset)
+
+    input_blocks = np.array(cumulator).transpose(1, 2, 3, 0).astype(load_obj.dtype)
+    
+    
+    ## Step 2d: Do the blockwise matrix decomposition
+    display("Running local SVD")
+    projected_data = np.random.randn(input_blocks.shape[2], max_components, input_blocks.shape[3])
+    results = single_block_md_vmap(input_blocks, projected_data, spatial_thres, temporal_thres, 1)
+
+
+
+    #Step 2e: Piece it all together into one orthonormal matrix (U-matrix)
+    display("Collating results into large spatial basis matrix and projecting data")
+    #Define the block weighting matrix
+    block_weights = np.ones((block_sizes[0], block_sizes[1]), dtype=load_obj.dtype)
+    hbh = block_sizes[0] // 2
+    hbw = block_sizes[1] // 2
+    # Increase weights to value block centers more than edges
+    block_weights[:hbh, :hbw] += np.minimum(
+        np.tile(np.arange(0, hbw), (hbh, 1)),
+        np.tile(np.arange(0, hbh), (hbw, 1)).T
+    )
+    block_weights[:hbh, hbw:] = np.fliplr(block_weights[:hbh, :hbw])
+    block_weights[hbh:, :] = np.flipud(block_weights[:hbh, :])
+
+
+
+    final_matrix = np.zeros((data.shape[0], data.shape[1], 0))
+    for i in range(len(pairs)):
+        dim_1_val = pairs[i][0]
+        dim_2_val = pairs[i][1]
+
+        spatial_comps = results[0][i, :, :]
+        decisions = results[1][i, :].flatten()
+
+        spatial_cropped = spatial_comps[:, decisions > 0].reshape((block_sizes[0], block_sizes[1], -1), order="F")
+        spatial_cropped = spatial_cropped * block_weights[:, :, None]
+        appendage = np.zeros((data.shape[0], data.shape[1], spatial_cropped.shape[2]))
+        appendage[dim_1_val:dim_1_val + block_sizes[0], dim_2_val:dim_2_val + block_sizes[1], :] = spatial_cropped
+        final_matrix = np.concatenate([final_matrix, appendage], axis = 2)
+
+
+    U_r = final_matrix.reshape((data.shape[0]*data.shape[1], -1), order="F")
+    U_r = scipy.sparse.csr_matrix(U_r)
+    projector = get_projector(U_r)
+
+    print(projector.shape)
+
+    ## Step 2f: Do sparse regression to get the V matrix: 
+    display("Running sparse regression")
+    V = load_obj.batch_matmul_PMD_fast(projector, order="F")
+
+
+    ## Step 2g: Do a SVD Reformat given U and V
+    display("Running SVD")
+    R, s, Vt = factored_svd(U_r, V)
+
+    display("Matrix decomposition completed")
+
+    return U_r, R, s, Vt, load_obj
