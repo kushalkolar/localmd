@@ -1,5 +1,8 @@
 """
-File for all evaluation metrics and functionality related to total variation and trend filtering
+File for all evaluation metrics and functionality related to total variation and trend filtering:
+NOTE: Any function with a commented-out decorator "@partial(jit)" is a helper function; it's more effective 
+to jit code at the highest level so the compiler can actually optimize the whole thing. But these functions are
+jit-able. 
 """
 import jax
 import jax.scipy
@@ -13,7 +16,7 @@ import numpy as np
 
 
 
-@partial(jit)
+#@partial(jit)
 def l1_norm(data):
     '''
     Calculates the overall l1 norm of the data
@@ -22,7 +25,7 @@ def l1_norm(data):
     final_sum = jnp.sum(data)
     return final_sum
 
-@partial(jit)
+#@partial(jit)
 def trend_filter_stat(trace):
     '''
     Applies a trend filter to a 1D time series dataset
@@ -43,7 +46,7 @@ def trend_filter_stat(trace):
     return jnp.sum(combined_mat)
 
 
-@partial(jit)
+#@partial(jit)
 def total_variation_stat(img):
     '''
     Applies a total variation filter to a 2D image
@@ -84,7 +87,7 @@ def total_variation_stat(img):
     
     return jnp.sum(accumulator)
 
-@partial(jit)
+#@partial(jit)
 def spatial_roughness_stat(img):
     '''
     Input: 
@@ -98,7 +101,7 @@ def spatial_roughness_stat(img):
     denominator = l1_norm(img)
     return numerator/denominator
 
-@partial(jit)
+#@partial(jit)
 def temporal_roughness_stat(trace):
     '''
     Input: 
@@ -112,15 +115,15 @@ def temporal_roughness_stat(trace):
     denominator = l1_norm(trace)
     return numerator/denominator
 
-spatial_roughness_stat_vmap = jit(vmap(spatial_roughness_stat, in_axes=(2)))
+spatial_roughness_stat_vmap = vmap(spatial_roughness_stat, in_axes=(2))
 temporal_roughness_stat_vmap = vmap(temporal_roughness_stat, in_axes=(0))
 
-@partial(jit)
+#@partial(jit)
 def get_roughness_stats(img, trace):
     spatial_stat = spatial_roughness_stat(img)
     temporal_stat = temporal_roughness_stat(trace)
 
-@partial(jit)
+#@partial(jit)
 def evaluate_fitness(img, trace, spatial_thres, temporal_thres):
     spatial_stat = spatial_roughness_stat(img)
     temporal_stat = temporal_roughness_stat(trace)
@@ -132,16 +135,16 @@ def evaluate_fitness(img, trace, spatial_thres, temporal_thres):
     
     return output
 
-evaluate_fitness_vmap = jit(vmap(evaluate_fitness, in_axes=(2, 1, None, None)))
+evaluate_fitness_vmap = vmap(evaluate_fitness, in_axes=(2, 1, None, None))
 
-@partial(jit)
+#@partial(jit)
 def construct_final_fitness_decision(imgs, traces, spatial_thres, temporal_thres, max_consec_failures):
     output = evaluate_fitness_vmap(imgs, traces, spatial_thres, temporal_thres)
     
     final_output = successive_filter(output, max_consec_failures)
     return final_output
 
-@partial(jit)
+#@partial(jit)
 def successive_filter(my_list, max_consec_failures):
     start = -1
     consec_failures = 0
@@ -153,7 +156,7 @@ def successive_filter(my_list, max_consec_failures):
     
     return my_list
     
-@partial(jit)                
+#@partial(jit)                
 def filter_from_starting_pt(input_pytree):
     my_list = input_pytree[0]
     start = input_pytree[1]
@@ -162,7 +165,7 @@ def filter_from_starting_pt(input_pytree):
     
     return my_list * temp_arange
 
-@partial(jit)
+#@partial(jit)
 def manage_failure(input_pytree):
     consec_failures = input_pytree[0]
     start = input_pytree[1]
@@ -173,7 +176,7 @@ def manage_failure(input_pytree):
     
     return (new_pytree[0], new_pytree[1])
 
-@partial(jit)
+#@partial(jit)
 def first_failure(input_pytree):
     k = input_pytree[0]
     start = input_pytree[1]
@@ -184,7 +187,7 @@ def first_failure(input_pytree):
     consec_failures = consec_failures + 1
     return (consec_failures, start)
 
-@partial(jit)
+#@partial(jit)
 def multi_failure(input_pytree):
     k = input_pytree[0]
     start = input_pytree[1]

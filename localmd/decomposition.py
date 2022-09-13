@@ -12,7 +12,7 @@ import jaxopt
 import numpy as np
 
 from localmd.evaluation import spatial_roughness_stat_vmap, temporal_roughness_stat_vmap, construct_final_fitness_decision
-from localmd.preprocessing_utils import standardize_block
+# from localmd.preprocessing_utils import standardize_block
 from localmd.tiff_loader import tiff_loader
 
 import sys
@@ -146,7 +146,7 @@ def iterative_rank_1_approx(test_data):
     return final_pytree
 
 
-@partial(jit)
+#@partial(jit)
 def truncated_random_svd(input_matrix, random_data):
     desired_rank = random_data.shape[1]
     projected = jnp.matmul(input_matrix, random_data)
@@ -172,7 +172,7 @@ def iterative_rank_1_approx_sims(test_data):
 
 
 
-@partial(jit)
+#@partial(jit)
 def decomposition_no_normalize_approx(block, random_projection_mat):
     d1, d2, T = block.shape
     block_2d = jnp.reshape(block, (d1*d2, T), order="F")
@@ -239,7 +239,7 @@ def threshold_heuristic(block_sizes, num_comps = 3, iters=10, num_sims=5, percen
 
 
 
-@partial(jit)
+#@partial(jit)
 def single_block_md(block, projection_data, spatial_thres, temporal_thres, max_consec_failures):
     '''
     Matrix Decomposition function for all blocks. 
