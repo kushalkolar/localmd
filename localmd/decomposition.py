@@ -224,8 +224,14 @@ def threshold_heuristic(block_sizes, num_comps = 3, iters=10, num_sims=5, percen
 
 @partial(jit)
 def single_block_md(block, projection_data, spatial_thres, temporal_thres, max_consec_failures):
+    '''
+    Matrix Decomposition function for all blocks. 
+    Inputs: 
+        block: jnp.array. Dimensions (block_1, block_2, T). We assume that this data has already been centered and noise-normalized
+    
+    '''
     #TODO: Get rid of max consec failures entirely from function API 
-    block = standardize_block(block) #Center and divide by noise standard deviation before doing matrix decomposition
+    # block = standardize_block(block) #Center and divide by noise standard deviation before doing matrix decomposition
     d1, d2, T = block.shape
     block_2d = jnp.reshape(block, (d1*d2, T), order="F")
     
@@ -245,3 +251,28 @@ def single_block_md(block, projection_data, spatial_thres, temporal_thres, max_c
     return u_mat, good_comps, v_mat
 
 single_block_md_vmap = jit(vmap(single_block_md, in_axes=(3,2, None, None, None)))
+
+def factored_svd(spatial_components, temporal_components):
+    """
+    Given a matrix factorization M=UQ (with U sparse) factorizes Q = RSVt so
+    that [UR]SVt is the SVD of M.
+    TODO: Accelerate using jax or torch for GPU
+    """
+
+    # Step 1: Othogonalize Temporal Components LQ = V
+    Qt, Lt = np.linalg.qr(temporal_components.T)
+
+    # Step 2: Fast Transformed Spatial Inner Product Sigma = L'U'UL
+    Sigma = np.asarray(spatial_components.T.dot(spatial_components).todense())
+    Sigma = np.dot(Lt, np.dot(Sigma, Lt.T))
+
+    # Step 3: Eigen Decomposition Of Sigma
+    eig_vals, eig_vecs = np.linalg.eigh(Sigma)  # Note: eig vals/vecs ascending
+    eig_vecs = eig_vecs[:, ::-1]  # Note: now vecs descending
+    singular_values = np.sqrt(eig_vals[::-1])  # Note: now vals descending
+
+    # Step 4: Apply Eigen Vectors Such That (UR, V) Are Singular Vectors
+    mixing_weights = Lt.T.dot(eig_vecs) / singular_values[None, :]
+    temporal_basis = eig_vecs.T.dot(Qt.T)
+
+    return mixing_weights, singular_values, temporal_basis  # R, s, Vt
