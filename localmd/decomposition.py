@@ -346,7 +346,7 @@ def localmd_decomposition(filename, block_sizes, overlap, frame_range, max_compo
     results = []
     results.append(np.zeros((0, block_sizes[0]*block_sizes[1], max_components)))
     results.append(np.zeros((0, max_components)))
-    results.append(np.zeros((0, max_components, load_obj.shape[2])))
+    results.append(np.zeros((0, max_components, len(frames)))
     
     cumulator_count = 0
     max_cumulator = batching
