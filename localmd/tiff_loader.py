@@ -130,7 +130,7 @@ class tiff_loader():
         '''
         starttime=time.time()
         num_frames = self.shape[2]
-        chunksize=500
+        chunksize= 2000
         num_iters = math.ceil(num_frames / chunksize)
         overall_mean = jnp.zeros((self.shape[0], self.shape[1]))
         num_frames = self.shape[2]
