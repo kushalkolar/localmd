@@ -267,6 +267,19 @@ def single_block_md(block, projection_data, spatial_thres, temporal_thres, max_c
     u_mat = jnp.reshape(u_mat, (d1*d2, -1), order="F")
     return u_mat, good_comps, v_mat
 
+def append_decomposition_results(curr_results, new_results):
+    '''
+    Each results list has 3 ndarrays: 
+        results[0]: The set of spatial components. Dimensions (# of blocks, d1*d2, num_comps per block). d1,d2 are block dimensions.
+        results[1]: The decisions for whether or not to accept/reject the components. Dimensions (#num blocks, num_comps per block)
+        results[2]: The set of temporal components for each block. Dimensions (# of blocks, num_comps, T) where T = number of frames in dataset.
+    '''
+    curr_results[0] = np.concatenate([curr_results[0], new_results[0]], axis=0)
+    curr_results[1] = np.concatenate([curr_results[1], new_results[1]], axis=0)
+    curr_results[2] = np.concatenate([curr_results[2], new_results[2]], axis=0)
+    
+    return curr_results
+
 single_block_md_vmap = jit(vmap(single_block_md, in_axes=(3,2, None, None, None)))
 
 def get_projector(U):
@@ -305,7 +318,7 @@ def factored_svd(spatial_components, temporal_components):
     return mixing_weights, singular_values, temporal_basis  # R, s, Vt
 
 
-def localmd_decomposition(filename, block_sizes, overlap, frame_range, max_components=50, sim_conf=5):
+def localmd_decomposition(filename, block_sizes, overlap, frame_range, max_components=50, sim_conf=5, batching=10):
     load_obj = tiff_loader(filename, dtype='float64', center=True, normalize=True, background_rank=0)
     start = frame_range[0]
     end = frame_range[1]
@@ -322,13 +335,21 @@ def localmd_decomposition(filename, block_sizes, overlap, frame_range, max_compo
     display("Loading Data")
     data = load_obj.temporal_crop_standardized(frames)
     
-    ##Step 2c: Run PMD and get the U matrix
-    display("Obtaining blocks")
+    ##Step 2c: Run PMD and get the U matrix components
+    display("Obtaining blocks and running local SVD")
     cumulator = []
 
     start_t = time.time()
 
     pairs = []
+    
+    results = []
+    results.append(np.zeros((0, block_sizes[0]*block_sizes[1], max_components)))
+    results.append(np.zeros((0, max_components)))
+    results.append(np.zeros((0, max_components, load_obj.shape[2])))
+    
+    cumulator_count = 0
+    max_cumulator = batching
 
     dim_1_iters = list(range(0, data.shape[0] - block_sizes[0] + 1, block_sizes[0] - overlap[0]))
     if dim_1_iters[-1] != data.shape[0] - block_sizes[0] and data.shape[0] - block_sizes[0] != 0:
@@ -343,14 +364,16 @@ def localmd_decomposition(filename, block_sizes, overlap, frame_range, max_compo
             pairs.append((k, j))
             subset = data[k:k+block_sizes[0], j:j+block_sizes[1], :]
             cumulator.append(subset)
-
-    input_blocks = np.array(cumulator).transpose(1, 2, 3, 0).astype(load_obj.dtype)
+            cumulator_count += 1
+            if cumulator_count >= max_cumulator or (k == dim_1_iters[-1] and j == dim_2_iters[-1]): #Ready to calculate the local SVD in batch across the patches
+                input_blocks = np.array(cumulator).transpose(1,2,3,0).astype(load_obj.dtype)
+                projected_data = np.random.randn(input_blocks.shape[2], max_components, input_blocks.shape[3])
+                new_results = single_block_md_vmap(input_blocks, projected_data, spatial_thres, temporal_thres, 1)
+                results = append_decomposition_results(results, new_results)
+                #Reset counting + cumulating variables
+                cumulator = []
+                cumulator_count = 0
     
-    
-    ## Step 2d: Do the blockwise matrix decomposition
-    display("Running local SVD")
-    projected_data = np.random.randn(input_blocks.shape[2], max_components, input_blocks.shape[3])
-    results = single_block_md_vmap(input_blocks, projected_data, spatial_thres, temporal_thres, 1)
 
 
 
