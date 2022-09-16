@@ -41,14 +41,14 @@ def display(msg):
 
 
 class tiff_loader():
-    def __init__(self, filename, dtype='float32', center=True, normalize=True, background_rank=15):
+    def __init__(self, filename, dtype='float32', center=True, normalize=True, background_rank=15, batch_size=10000):
         with tifffile.TiffFile(filename) as tffl: 
             if len(tffl.pages) == 1: 
                 raise ValueError("PMD does not accept single-page tiff datasets. Instead, pass your raw through the pipeline starting from the motion correction step.")
         self.filename = filename
         self.dtype = dtype
         self.shape = self._get_shape()
-        self._estimate_batch_size()
+        self._estimate_batch_size(frame_const=batch_size)
         self.center = center
         self.normalize=normalize
         if background_rank > 0:
