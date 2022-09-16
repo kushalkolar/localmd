@@ -318,8 +318,8 @@ def factored_svd(spatial_components, temporal_components):
     return mixing_weights, singular_values, temporal_basis  # R, s, Vt
 
 
-def localmd_decomposition(filename, block_sizes, overlap, frame_range, max_components=50, sim_conf=5, batching=10):
-    load_obj = tiff_loader(filename, dtype='float64', center=True, normalize=True, background_rank=0)
+def localmd_decomposition(filename, block_sizes, overlap, frame_range, max_components=50, sim_conf=5, batching=10, tiff_batch_size = 10000):
+    load_obj = tiff_loader(filename, dtype='float64', center=True, normalize=True, background_rank=0, batch_size=tiff_batch_size)
     start = frame_range[0]
     end = frame_range[1]
     end = min(end, load_obj.shape[2])
