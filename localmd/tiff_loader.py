@@ -144,15 +144,18 @@ class tiff_loader():
             overall_mean = overall_mean + mean_value
         display('Calculate mean took {:.2f} seconds'.format(time.time() - starttime))
         return np.array(overall_mean)
-        
-    def _calculate_normalizer(self, sample_size = 2000, num_iters = 20):
+    
+    
+    def _calculate_normalizer(self, num_iters = 20):
         if self.shape[2] <= self.batch_size: 
             display("Calculating noise estimate on full data")
             return self._calculate_normalizer_full()
-        else: 
-            display("Calculating normalizer")
+        else:
+            sample_size = self.batch_size
+            display("Calculating normalizer in subregions")
             cumulator = np.zeros((self.shape[0], self.shape[1]), dtype=self.dtype)
             a = [i for i in range(self.shape[2] - sample_size)]
+            num_iters = min(num_iters, self.shape[2] - sample_size)
             start_pts = np.random.choice(a, size = num_iters, replace = False)
             for k in tqdm(range(num_iters)):
                 start_pt = start_pts[k]
