@@ -421,20 +421,15 @@ def localmd_decomposition(filename, block_sizes, overlap, frame_range, max_compo
 
     U_r = final_matrix.reshape((data.shape[0]*data.shape[1], -1), order=order)
     U_r = scipy.sparse.csr_matrix(U_r)
-    display("U_r type is {}".format(U_r.dtype))
     projector = get_projector(U_r)
-
-    print(projector.shape)
-    print("projector dtype is {}".format(projector.dtype))
 
     ## Step 2f: Do sparse regression to get the V matrix: 
     display("Running sparse regression")
     V = load_obj.batch_matmul_PMD_fast(projector)
-    display("V type is {}".format(V.dtype))
+
     
     ## Step 2g: Aggregate the global SVD with the localMD results to create the final decomposition
     display("Aggregating Global SVD with localMD results")
-    display("the bg rank is {}".format(load_obj.background_rank))
     U_r, V = aggregate_decomposition(U_r, V, load_obj)
 
 
