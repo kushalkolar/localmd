@@ -144,7 +144,7 @@ class tiff_loader():
             mean_value = jnp.sum(data, axis=0) / num_frames
             overall_mean = overall_mean + mean_value
         display('Calculate mean took {:.2f} seconds'.format(time.time() - starttime))
-        return np.array(overall_mean)
+        return np.array(overall_mean, dtype=self.dtype)
     
     
     def _calculate_normalizer(self, num_iters = 20):
@@ -162,7 +162,7 @@ class tiff_loader():
                 start_pt = start_pts[k]
                 frames = [i for i in range(start_pt, min(self.shape[2], start_pt + sample_size))]
                 crop_data = tifffile.imread(self.filename, key=frames).transpose(1,2,0).astype(self.dtype)
-                noise_est_2d = np.array(center_and_get_noise_estimate(crop_data, self.mean_img))
+                noise_est_2d = np.array(center_and_get_noise_estimate(crop_data, self.mean_img), dtype=self.dtype)
                 cumulator += noise_est_2d
                 
             cumulator /= num_iters
@@ -173,7 +173,7 @@ class tiff_loader():
     def _calculate_normalizer_full(self):
         frames = [i for i in range(self.shape[2])]
         dataset = tifffile.imread(self.filename).transpose(1,2,0).astype(self.dtype)
-        norms = np.array(center_and_get_noise_estimate(dataset, self.mean_img))
+        norms = np.array(center_and_get_noise_estimate(dataset, self.mean_img), dtype=self.dtype)
         norms[norms == 0] = 1.0
         return norms
         
@@ -231,7 +231,7 @@ class tiff_loader():
         Assumption: M has a small number of rows (and many columns)
         TODO: Add use jax.numpy instead of numpy for gpu speedup here
         '''
-        result = np.zeros((M.shape[0], self.shape[2]))
+        result = np.zeros((M.shape[0], self.shape[2]), dtype=self.dtype)
         num_iters = math.ceil(self.shape[2]/self.batch_size)
         MX = M.dot(self.spatial_basis) #This will be r x (background_rank)
         MXY = MX.dot(self.temporal_basis) #This will be r x T

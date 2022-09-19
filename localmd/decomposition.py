@@ -264,7 +264,6 @@ def single_block_md(block, projection_data, spatial_thres, temporal_thres, max_c
     good_comps = construct_final_fitness_decision(u_mat, v_mat.T, spatial_thres,\
                                                   temporal_thres, max_consec_failures)
     
-    # u_mat = jnp.reshape(u_mat, (d1*d2, -1), order="F")
     return u_mat, good_comps, v_mat
 
 single_block_md_vmap = jit(vmap(single_block_md, in_axes=(3,2, None, None, None)))
@@ -281,6 +280,14 @@ def append_decomposition_results(curr_results, new_results):
     curr_results[2] = np.concatenate([curr_results[2], new_results[2]], axis=0)
     
     return curr_results
+
+def cast_decomposition_results(new_results, cast):
+    return (np.array(new_results[0], dtype=cast), np.array(new_results[1], dtype=cast), np.array(new_results[2], dtype=cast))
+#     new_results[0] = np.array(new_results[0], dtype=cast)
+#     new_results[1] = np.array(new_results[1], dtype=cast)
+#     new_results[2] = np.array(new_results[2], dtype=cast)
+    
+#     return new_results
 
 
 
@@ -346,9 +353,9 @@ def localmd_decomposition(filename, block_sizes, overlap, frame_range, max_compo
     pairs = []
     
     results = []
-    results.append(np.zeros((0, block_sizes[0],block_sizes[1], max_components)))
-    results.append(np.zeros((0, max_components)))
-    results.append(np.zeros((0, max_components, len(frames))))
+    results.append(np.zeros((0, block_sizes[0],block_sizes[1], max_components), dtype=dtype))
+    results.append(np.zeros((0, max_components), dtype=dtype))
+    results.append(np.zeros((0, max_components, len(frames)), dtype=dtype))
     
     cumulator_count = 0
     max_cumulator = batching
@@ -364,13 +371,14 @@ def localmd_decomposition(filename, block_sizes, overlap, frame_range, max_compo
     for k in dim_1_iters:
         for j in dim_2_iters:
             pairs.append((k, j))
-            subset = data[k:k+block_sizes[0], j:j+block_sizes[1], :]
+            subset = data[k:k+block_sizes[0], j:j+block_sizes[1], :].astype(dtype)
             cumulator.append(subset)
             cumulator_count += 1
             if cumulator_count >= max_cumulator or (k == dim_1_iters[-1] and j == dim_2_iters[-1]): #Ready to calculate the local SVD in batch across the patches
-                input_blocks = np.array(cumulator).transpose(1,2,3,0).astype(load_obj.dtype)
-                projected_data = np.random.randn(input_blocks.shape[2], max_components, input_blocks.shape[3])
+                input_blocks = np.array(cumulator).transpose(1,2,3,0).astype(dtype)
+                projected_data = np.random.randn(input_blocks.shape[2], max_components, input_blocks.shape[3]).astype(dtype)
                 new_results = single_block_md_vmap(input_blocks, projected_data, spatial_thres, temporal_thres, 1)
+                new_results = cast_decomposition_results(new_results, dtype)
                 results = append_decomposition_results(results, new_results)
                 #Reset counting + cumulating variables
                 cumulator = []
@@ -382,7 +390,7 @@ def localmd_decomposition(filename, block_sizes, overlap, frame_range, max_compo
     #Step 2e: Piece it all together into one orthonormal matrix (U-matrix)
     display("Collating results into large spatial basis matrix and projecting data")
     #Define the block weighting matrix
-    block_weights = np.ones((block_sizes[0], block_sizes[1]), dtype=load_obj.dtype)
+    block_weights = np.ones((block_sizes[0], block_sizes[1]), dtype=dtype)
     hbh = block_sizes[0] // 2
     hbw = block_sizes[1] // 2
     # Increase weights to value block centers more than edges
@@ -395,7 +403,7 @@ def localmd_decomposition(filename, block_sizes, overlap, frame_range, max_compo
 
 
 
-    final_matrix = np.zeros((data.shape[0], data.shape[1], 0))
+    final_matrix = np.zeros((data.shape[0], data.shape[1], 0), dtype=dtype)
     for i in range(len(pairs)):
         dim_1_val = pairs[i][0]
         dim_2_val = pairs[i][1]
@@ -405,7 +413,7 @@ def localmd_decomposition(filename, block_sizes, overlap, frame_range, max_compo
 
         spatial_cropped = spatial_comps[:, :, decisions > 0]#.reshape((block_sizes[0], block_sizes[1], -1), order=order)
         spatial_cropped = spatial_cropped * block_weights[:, :, None]
-        appendage = np.zeros((data.shape[0], data.shape[1], spatial_cropped.shape[2]))
+        appendage = np.zeros((data.shape[0], data.shape[1], spatial_cropped.shape[2]), dtype=dtype)
         appendage[dim_1_val:dim_1_val + block_sizes[0], dim_2_val:dim_2_val + block_sizes[1], :] = spatial_cropped
         final_matrix = np.concatenate([final_matrix, appendage], axis = 2)
 
@@ -413,13 +421,16 @@ def localmd_decomposition(filename, block_sizes, overlap, frame_range, max_compo
 
     U_r = final_matrix.reshape((data.shape[0]*data.shape[1], -1), order=order)
     U_r = scipy.sparse.csr_matrix(U_r)
+    display("U_r type is {}".format(U_r.dtype))
     projector = get_projector(U_r)
 
     print(projector.shape)
+    print("projector dtype is {}".format(projector.dtype))
 
     ## Step 2f: Do sparse regression to get the V matrix: 
     display("Running sparse regression")
     V = load_obj.batch_matmul_PMD_fast(projector)
+    display("V type is {}".format(V.dtype))
     
     ## Step 2g: Aggregate the global SVD with the localMD results to create the final decomposition
     display("Aggregating Global SVD with localMD results")
