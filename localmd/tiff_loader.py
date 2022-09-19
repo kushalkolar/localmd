@@ -41,19 +41,20 @@ def display(msg):
 
 
 class tiff_loader():
-    def __init__(self, filename, dtype='float32', center=True, normalize=True, background_rank=15, batch_size=10000):
+    def __init__(self, filename, dtype='float32', center=True, normalize=True, background_rank=15, batch_size=10000, order="F"):
         with tifffile.TiffFile(filename) as tffl: 
             if len(tffl.pages) == 1: 
                 raise ValueError("PMD does not accept single-page tiff datasets. Instead, pass your raw through the pipeline starting from the motion correction step.")
+        self.order = order
         self.filename = filename
         self.dtype = dtype
         self.shape = self._get_shape()
         self._estimate_batch_size(frame_const=batch_size)
         self.center = center
         self.normalize=normalize
-        if background_rank > 0:
-            print("Currently pre-matrix decomposition SVD is not supported")
-        self.background_rank = 0#background_rank
+        # if background_rank > 0:
+            # print("Currently pre-matrix decomposition SVD is not supported")
+        self.background_rank = background_rank
         self.shape = self._get_shape()
         self._initialize_all_normalizers()
         self._initialize_all_background()
@@ -174,7 +175,7 @@ class tiff_loader():
         dataset = tifffile.imread(self.filename).transpose(1,2,0).astype(self.dtype)
         norms = np.array(center_and_get_noise_estimate(dataset, self.mean_img))
         norms[norms == 0] = 1.0
-        return norms.reshape((self.shape[0], self.shape[1]))
+        return norms
         
     def temporal_crop_standardized(self, frames):
         crop_data = self.temporal_crop(frames)
@@ -192,7 +193,7 @@ class tiff_loader():
         crop_data = self.temporal_crop_standardized(random_data)
         
         spatial_basis, _, _ = randomized_svd(
-        M=crop_data.reshape((-1, crop_data.shape[-1])),
+        M=crop_data.reshape((-1, crop_data.shape[-1]), order=self.order),
         n_components=self.background_rank
     )
         
@@ -202,10 +203,10 @@ class tiff_loader():
         s^t * (Data - mean * 1^t) / stdv
         '''
         
-        stdv_reshape = self.std_img.reshape((1, -1))
+        stdv_reshape = self.std_img.reshape((1, -1), order=self.order)
         spatial_basis_scaled = spatial_basis.T / stdv_reshape 
         
-        scaled_spatial_mean = spatial_basis_scaled.dot(self.mean_img.reshape((-1, 1))) #This is s^t/stdv * mean. Shape bg_rank x 1 
+        scaled_spatial_mean = spatial_basis_scaled.dot(self.mean_img.reshape((-1, 1), order=self.order)) #This is s^t/stdv * mean. Shape bg_rank x 1 
         
         #Given orthonormal spatial basis, we now calculate the temporal basis
         num_iters = math.ceil(self.shape[2]/self.batch_size)
@@ -215,7 +216,7 @@ class tiff_loader():
             start = k*self.batch_size
             end = min((k+1)*self.batch_size, self.shape[2])
             frames = [i for i in range(start, end)]
-            crop_data = self.temporal_crop(frames).reshape((-1, len(frames)))
+            crop_data = self.temporal_crop(frames).reshape((-1, len(frames)), order=self.order)
             prod = spatial_basis_scaled.dot(crop_data)
             temporal_basis[:, start:end] = prod
         
@@ -224,7 +225,7 @@ class tiff_loader():
         return (spatial_basis.astype(self.dtype), temporal_basis.astype(self.dtype))
     
     
-    def batch_matmul_PMD_fast(self, M, order="C"):
+    def batch_matmul_PMD_fast(self, M):
         '''
         Efficient batch matmul for sparse regression
         Assumption: M has a small number of rows (and many columns)
@@ -235,14 +236,14 @@ class tiff_loader():
         MX = M.dot(self.spatial_basis) #This will be r x (background_rank)
         MXY = MX.dot(self.temporal_basis) #This will be r x T
         
-        M_std = M / self.std_img.reshape((1, -1))
-        M_std_mean = M_std.dot(self.mean_img.reshape((-1, 1)))
+        M_std = M / self.std_img.reshape((1, -1), order=self.order)
+        M_std_mean = M_std.dot(self.mean_img.reshape((-1, 1), order=self.order))
         
         for k in tqdm(range(num_iters)):
             start = k *self.batch_size
             end = min((k+1)*self.batch_size, self.shape[2])
             frames = [i for i in range(start, end)]
-            crop_data = self.temporal_crop(frames).reshape((-1, len(frames)), order=order)
+            crop_data = self.temporal_crop(frames).reshape((-1, len(frames)), order=self.order)
             result[:, start:end] = M_std.dot(crop_data)  #This is now r x batch_size 
             
         result -= M_std_mean
@@ -251,11 +252,18 @@ class tiff_loader():
         return result
     
     
-    def temporal_crop_PMD(self, frames):
+    def temporal_crop_with_filter(self, frames):
         crop_data = self.temporal_crop_standardized(frames)
-        spatial_r = self.spatial_basis.reshape((self.shape[0], self.shape[1], self.spatial_basis.shape[1]))
+        spatial_r = self.spatial_basis.reshape((self.shape[0], self.shape[1], self.spatial_basis.shape[1]), order=self.order)
         temporal_basis_crop = self.temporal_basis[:, frames]
-        subt = np.tensordot(spatial_r, temporal_basis_crop, axes=(2,0))
-        crop_data -= subt
-        return crop_data
+        return np.array(filter_components(crop_data, spatial_r, temporal_basis_crop))
+        # subt = np.tensordot(spatial_r, temporal_basis_crop, axes=(2,0))
+        # crop_data -= subt
+        # return crop_data
+                        
+  
+@partial(jit)
+def filter_components(data, spatial_r, temporal_basis):
+    subt = jnp.tensordot(spatial_r, temporal_basis, axes=(2, 0))
+    return data - subt
     

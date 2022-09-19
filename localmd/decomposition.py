@@ -264,8 +264,10 @@ def single_block_md(block, projection_data, spatial_thres, temporal_thres, max_c
     good_comps = construct_final_fitness_decision(u_mat, v_mat.T, spatial_thres,\
                                                   temporal_thres, max_consec_failures)
     
-    u_mat = jnp.reshape(u_mat, (d1*d2, -1), order="F")
+    # u_mat = jnp.reshape(u_mat, (d1*d2, -1), order="F")
     return u_mat, good_comps, v_mat
+
+single_block_md_vmap = jit(vmap(single_block_md, in_axes=(3,2, None, None, None)))
 
 def append_decomposition_results(curr_results, new_results):
     '''
@@ -280,7 +282,7 @@ def append_decomposition_results(curr_results, new_results):
     
     return curr_results
 
-single_block_md_vmap = jit(vmap(single_block_md, in_axes=(3,2, None, None, None)))
+
 
 def get_projector(U):
     #TODO: Use Pytorch_sparse to accelerate the matmul on GPU/TPU... (may be overkill)
@@ -318,8 +320,8 @@ def factored_svd(spatial_components, temporal_components):
     return mixing_weights, singular_values, temporal_basis  # R, s, Vt
 
 
-def localmd_decomposition(filename, block_sizes, overlap, frame_range, max_components=50, sim_conf=5, batching=10, tiff_batch_size = 10000, dtype='float32'):
-    load_obj = tiff_loader(filename, dtype=dtype, center=True, normalize=True, background_rank=0, batch_size=tiff_batch_size)
+def localmd_decomposition(filename, block_sizes, overlap, frame_range, max_components=50, background_rank=15, sim_conf=5, batching=10, tiff_batch_size = 10000, dtype='float32', order="F"):
+    load_obj = tiff_loader(filename, dtype=dtype, center=True, normalize=True, background_rank=background_rank, batch_size=tiff_batch_size, order=order)
     start = frame_range[0]
     end = frame_range[1]
     end = min(end, load_obj.shape[2])
@@ -333,7 +335,7 @@ def localmd_decomposition(filename, block_sizes, overlap, frame_range, max_compo
     
     ##Step 2b: Load the data you will do blockwise SVD on
     display("Loading Data")
-    data = load_obj.temporal_crop_standardized(frames)
+    data = load_obj.temporal_crop_with_filter(frames)
     
     ##Step 2c: Run PMD and get the U matrix components
     display("Obtaining blocks and running local SVD")
@@ -344,7 +346,7 @@ def localmd_decomposition(filename, block_sizes, overlap, frame_range, max_compo
     pairs = []
     
     results = []
-    results.append(np.zeros((0, block_sizes[0]*block_sizes[1], max_components)))
+    results.append(np.zeros((0, block_sizes[0],block_sizes[1], max_components)))
     results.append(np.zeros((0, max_components)))
     results.append(np.zeros((0, max_components, len(frames))))
     
@@ -398,17 +400,18 @@ def localmd_decomposition(filename, block_sizes, overlap, frame_range, max_compo
         dim_1_val = pairs[i][0]
         dim_2_val = pairs[i][1]
 
-        spatial_comps = results[0][i, :, :]
+        spatial_comps = results[0][i, :, :, :]
         decisions = results[1][i, :].flatten()
 
-        spatial_cropped = spatial_comps[:, decisions > 0].reshape((block_sizes[0], block_sizes[1], -1), order="F")
+        spatial_cropped = spatial_comps[:, :, decisions > 0]#.reshape((block_sizes[0], block_sizes[1], -1), order=order)
         spatial_cropped = spatial_cropped * block_weights[:, :, None]
         appendage = np.zeros((data.shape[0], data.shape[1], spatial_cropped.shape[2]))
         appendage[dim_1_val:dim_1_val + block_sizes[0], dim_2_val:dim_2_val + block_sizes[1], :] = spatial_cropped
         final_matrix = np.concatenate([final_matrix, appendage], axis = 2)
 
+    
 
-    U_r = final_matrix.reshape((data.shape[0]*data.shape[1], -1), order="F")
+    U_r = final_matrix.reshape((data.shape[0]*data.shape[1], -1), order=order)
     U_r = scipy.sparse.csr_matrix(U_r)
     projector = get_projector(U_r)
 
@@ -416,13 +419,31 @@ def localmd_decomposition(filename, block_sizes, overlap, frame_range, max_compo
 
     ## Step 2f: Do sparse regression to get the V matrix: 
     display("Running sparse regression")
-    V = load_obj.batch_matmul_PMD_fast(projector, order="F")
+    V = load_obj.batch_matmul_PMD_fast(projector)
+    
+    ## Step 2g: Aggregate the global SVD with the localMD results to create the final decomposition
+    display("Aggregating Global SVD with localMD results")
+    display("the bg rank is {}".format(load_obj.background_rank))
+    U_r, V = aggregate_decomposition(U_r, V, load_obj)
 
 
-    ## Step 2g: Do a SVD Reformat given U and V
-    display("Running SVD")
+    ## Step 2h: Do a SVD Reformat given U and V
+    display("Running QR decomposition on V")
     R, s, Vt = factored_svd(U_r, V)
 
     display("Matrix decomposition completed")
 
     return U_r, R, s, Vt, load_obj
+
+
+def aggregate_decomposition(U_r, V, load_obj):
+    if load_obj.background_rank == 0:
+        return U_r, V
+    else:
+        spatial_bg = load_obj.spatial_basis
+        temporal_bg = load_obj.temporal_basis
+        spatial_bg_sparse = scipy.sparse.coo_matrix(spatial_bg)
+        U_r = scipy.sparse.hstack([U_r, spatial_bg_sparse])
+        V = np.concatenate([V, temporal_bg], axis = 0)
+    
+        return U_r, V
