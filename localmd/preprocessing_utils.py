@@ -14,9 +14,9 @@ def get_noise_estimate(trace):
 
     indices = jnp.arange(start, end)
     values = jnp.take(output_welch[1], indices) * 0.5
-    sum_values = jnp.sqrt(jnp.sum(values))
+    sum_values = jnp.sum(values)
 
-    return sum_values / (end - start)
+    return jnp.sqrt(sum_values / (end - start))
 
 get_noise_estimate_vmap = jit(vmap(get_noise_estimate, in_axes = (0)))
 
