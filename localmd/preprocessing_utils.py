@@ -7,6 +7,20 @@ import functools
 from functools import partial
 
 @partial(jit)
+def get_mean_and_noise(movie, mean_divisor):
+    '''
+    This function is used to sum the movie chunk (and divide by total number of frames in ENTIRE movie, not the movie chunk) and to also calculate the noise variance in this chunk. 
+    '''
+    sum_val = jnp.sum(movie, axis = 2) / mean_divisor
+    d1, d2, T = movie.shape
+    movie_centered_2d = jnp.reshape(movie, (d1*d2, T), order="F")
+    noise_estimate_1d = get_noise_estimate_vmap(movie_centered_2d)
+    noise_estimate_2d = jnp.reshape(noise_estimate_1d, (d1, d2), order="F")
+    return sum_val, noise_estimate_2d
+
+    
+
+@partial(jit)
 def get_noise_estimate(trace):
     output_welch = jax.scipy.signal.welch(trace, noverlap=128)
     start = int(256/4 + 1)

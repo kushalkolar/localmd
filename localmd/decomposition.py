@@ -12,12 +12,39 @@ import jaxopt
 import numpy as np
 
 from localmd.evaluation import spatial_roughness_stat_vmap, temporal_roughness_stat_vmap, construct_final_fitness_decision
-# from localmd.preprocessing_utils import standardize_block
-from localmd.tiff_loader import tiff_loader
+
 
 import sys
 import datetime
 import os
+
+
+import os
+import pathlib
+import sys
+import math
+import tifffile
+
+import numpy as np
+import jax
+import jax.numpy as jnp
+from jax import jit, vmap
+import functools
+from functools import partial
+import torch
+import torch.multiprocessing as multiprocessing
+
+
+import scipy.sparse
+
+from localmd.preprocessing_utils import get_noise_estimate_vmap, center_and_get_noise_estimate
+from localmd.tiff_loader import tiff_loader
+
+
+import time
+import datetime
+import sys
+
 
 def display(msg):
     """
@@ -239,7 +266,7 @@ def threshold_heuristic(block_sizes, num_comps = 3, iters=10, num_sims=5, percen
 
 
 
-#@partial(jit)
+@partial(jit)
 def single_block_md(block, projection_data, spatial_thres, temporal_thres, max_consec_failures):
     '''
     Matrix Decomposition function for all blocks. 
@@ -260,13 +287,12 @@ def single_block_md(block, projection_data, spatial_thres, temporal_thres, max_c
     
 
     
-    ##Now we begin the evaluation phase
+#     ##Now we begin the evaluation phase
     good_comps = construct_final_fitness_decision(u_mat, v_mat.T, spatial_thres,\
                                                   temporal_thres, max_consec_failures)
     
     return u_mat, good_comps, v_mat
 
-single_block_md_vmap = jit(vmap(single_block_md, in_axes=(3,2, None, None, None)))
 
 def append_decomposition_results(curr_results, new_results):
     '''
@@ -275,19 +301,14 @@ def append_decomposition_results(curr_results, new_results):
         results[1]: The decisions for whether or not to accept/reject the components. Dimensions (#num blocks, num_comps per block)
         results[2]: The set of temporal components for each block. Dimensions (# of blocks, num_comps, T) where T = number of frames in dataset.
     '''
-    curr_results[0] = np.concatenate([curr_results[0], new_results[0]], axis=0)
-    curr_results[1] = np.concatenate([curr_results[1], new_results[1]], axis=0)
-    curr_results[2] = np.concatenate([curr_results[2], new_results[2]], axis=0)
+    curr_results[0] = np.concatenate([curr_results[0], new_results[0][None, :, :]], axis=0)
+    curr_results[1] = np.concatenate([curr_results[1], new_results[1][None, :]], axis=0)
+    curr_results[2] = np.concatenate([curr_results[2], new_results[2][None, :, :]], axis=0)
     
     return curr_results
 
 def cast_decomposition_results(new_results, cast):
     return (np.array(new_results[0], dtype=cast), np.array(new_results[1], dtype=cast), np.array(new_results[2], dtype=cast))
-#     new_results[0] = np.array(new_results[0], dtype=cast)
-#     new_results[1] = np.array(new_results[1], dtype=cast)
-#     new_results[2] = np.array(new_results[2], dtype=cast)
-    
-#     return new_results
 
 
 
@@ -372,18 +393,10 @@ def localmd_decomposition(filename, block_sizes, overlap, frame_range, max_compo
         for j in dim_2_iters:
             pairs.append((k, j))
             subset = data[k:k+block_sizes[0], j:j+block_sizes[1], :].astype(dtype)
-            cumulator.append(subset)
-            cumulator_count += 1
-            if cumulator_count >= max_cumulator or (k == dim_1_iters[-1] and j == dim_2_iters[-1]): #Ready to calculate the local SVD in batch across the patches
-                input_blocks = np.array(cumulator).transpose(1,2,3,0).astype(dtype)
-                projected_data = np.random.randn(input_blocks.shape[2], max_components, input_blocks.shape[3]).astype(dtype)
-                new_results = single_block_md_vmap(input_blocks, projected_data, spatial_thres, temporal_thres, 1)
-                new_results = cast_decomposition_results(new_results, dtype)
-                results = append_decomposition_results(results, new_results)
-                #Reset counting + cumulating variables
-                cumulator = []
-                cumulator_count = 0
-    
+            projected_data = np.random.randn(subset.shape[2], max_components).astype(dtype)
+            new_results = single_block_md(subset, projected_data, spatial_thres, temporal_thres, 1)
+            new_results = cast_decomposition_results(new_results, dtype)
+            results = append_decomposition_results(results, new_results)    
 
 
 
@@ -427,11 +440,9 @@ def localmd_decomposition(filename, block_sizes, overlap, frame_range, max_compo
     display("Running sparse regression")
     V = load_obj.batch_matmul_PMD_fast(projector)
 
-    
     ## Step 2g: Aggregate the global SVD with the localMD results to create the final decomposition
     display("Aggregating Global SVD with localMD results")
     U_r, V = aggregate_decomposition(U_r, V, load_obj)
-
 
     ## Step 2h: Do a SVD Reformat given U and V
     display("Running QR decomposition on V")
