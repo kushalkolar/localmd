@@ -25,6 +25,8 @@ import sys
 import math
 import tifffile
 
+from tqdm import tqdm
+
 import numpy as np
 import jax
 import jax.numpy as jnp
@@ -33,7 +35,6 @@ import functools
 from functools import partial
 import torch
 import torch.multiprocessing as multiprocessing
-
 
 import scipy.sparse
 
@@ -199,7 +200,7 @@ def iterative_rank_1_approx_sims(test_data):
 
 
 
-#@partial(jit)
+@partial(jit)
 def decomposition_no_normalize_approx(block, random_projection_mat):
     d1, d2, T = block.shape
     block_2d = jnp.reshape(block, (d1*d2, T), order="F")
@@ -213,7 +214,7 @@ def decomposition_no_normalize_approx(block, random_projection_mat):
 
     return spatial_statistics, temporal_statistics
 
-decomposition_no_normalize_approx_vmap = jit(vmap(decomposition_no_normalize_approx, in_axes = (3, 2)))
+# decomposition_no_normalize_approx_vmap = jit(vmap(decomposition_no_normalize_approx, in_axes = (3, 2)))
 
 
 @partial(jit)
@@ -232,7 +233,30 @@ def decomposition_no_normalize(block):
 
 decomposition_no_normalize_vmap = jit(vmap(decomposition_no_normalize, in_axes = (3)))
 
-def threshold_heuristic(block_sizes, num_comps = 3, iters=10, num_sims=5, percentile_threshold = 5):
+
+class random_projection_dataset():
+    def __init__(self, iters, dims, num_comps):
+        if iters <= 0:
+            raise ValueError("need a nonnegative number of iterations")
+        self.iters = iters
+        self.d1, self.d2, self.T = dims
+        self.num_comps = num_comps
+        
+        
+        
+    def __len__(self):
+        return self.iters
+    
+    
+    def __getitem__(self, index):
+        noise_data = np.random.randn(self.d1, self.d2, self.T)
+        random_projection = np.random.randn(self.T, self.num_comps)
+        return (noise_data, random_projection)
+  
+def regular_collate(batch):
+    return batch[0]
+
+def threshold_heuristic(block_sizes, num_comps = 3, iters=50, percentile_threshold = 5):
     '''
     We simulate the roughness statistics for components when we fit to standard normal noise
     Inputs: 
@@ -246,15 +270,18 @@ def threshold_heuristic(block_sizes, num_comps = 3, iters=10, num_sims=5, percen
     d1, d2, T = block_sizes
     spatial_cumulator = np.zeros((0,))
     temporal_cumulator = np.zeros((0, ))
+    
+    random_dataobj = random_projection_dataset(iters, (d1,d2,T), num_comps)
 
-    for j in range(iters):
-        noise_data = np.random.randn(d1, d2, T, num_sims)
-        random_projection = np.random.randn(T, num_comps, num_sims)
+    num_cpu = multiprocessing.cpu_count()
+    num_workers = min(len(random_dataobj), num_cpu-1)
+    num_workers = max(num_workers, 0)
+    loader = torch.utils.data.DataLoader(random_dataobj, batch_size=1,
+                                             shuffle=False, num_workers=num_workers, collate_fn=regular_collate, timeout=0)
+    for i, data in enumerate(tqdm(loader), 0):
+        noise_data, random_projection = data
 
-        results = decomposition_no_normalize_approx_vmap(noise_data, random_projection)
-
-        spatial_temp = results[0].reshape((-1,))
-        temporal_temp = results[1].reshape((-1,))
+        spatial_temp, temporal_temp = decomposition_no_normalize_approx(noise_data, random_projection)
 
         spatial_cumulator = np.concatenate([spatial_cumulator, spatial_temp])
         temporal_cumulator = np.concatenate([temporal_cumulator, temporal_temp])
@@ -359,7 +386,7 @@ def localmd_decomposition(filename, block_sizes, overlap, frame_range, max_compo
     
     ##Step 2a: Get the spatial and temporal thresholds
     display("Running Simulations")
-    spatial_thres, temporal_thres = threshold_heuristic([block_sizes[0], block_sizes[1], len(frames)], num_comps = 1, iters=25, num_sims = 10, percentile_threshold=sim_conf)
+    spatial_thres, temporal_thres = threshold_heuristic([block_sizes[0], block_sizes[1], len(frames)], num_comps = 1, iters=250, percentile_threshold=sim_conf)
     
     ##Step 2b: Load the data you will do blockwise SVD on
     display("Loading Data")
