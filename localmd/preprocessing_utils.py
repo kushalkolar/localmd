@@ -20,7 +20,7 @@ def get_mean_and_noise(movie, mean_divisor):
 
     
 
-@partial(jit)
+
 def get_noise_estimate(trace):
     output_welch = jax.scipy.signal.welch(trace, noverlap=128)
     start = int(256/4 + 1)
@@ -32,7 +32,7 @@ def get_noise_estimate(trace):
 
     return jnp.sqrt(sum_values / (end - start))
 
-get_noise_estimate_vmap = jit(vmap(get_noise_estimate, in_axes = (0)))
+get_noise_estimate_vmap = vmap(get_noise_estimate, in_axes = (0))
 
 @partial(jit)
 def center_and_get_noise_estimate(movie, mean):
