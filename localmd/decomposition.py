@@ -379,7 +379,7 @@ def localmd_decomposition(filename, block_sizes, overlap, frame_range, max_compo
     results.append(np.zeros((0, max_components, len(frames)), dtype=dtype))
     
     cumulator_count = 0
-    max_cumulator = batching
+    # max_cumulator = batching
 
     dim_1_iters = list(range(0, data.shape[0] - block_sizes[0] + 1, block_sizes[0] - overlap[0]))
     if dim_1_iters[-1] != data.shape[0] - block_sizes[0] and data.shape[0] - block_sizes[0] != 0:
@@ -438,7 +438,7 @@ def localmd_decomposition(filename, block_sizes, overlap, frame_range, max_compo
 
     ## Step 2f: Do sparse regression to get the V matrix: 
     display("Running sparse regression")
-    V = load_obj.batch_matmul_PMD_fast(projector)
+    V = load_obj.V_projection(projector)
 
     ## Step 2g: Aggregate the global SVD with the localMD results to create the final decomposition
     display("Aggregating Global SVD with localMD results")
