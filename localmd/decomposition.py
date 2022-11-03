@@ -187,6 +187,7 @@ def truncated_random_svd(input_matrix, random_data):
     return [U_final, V]
 
 
+
 @partial(jit)
 def iterative_rank_1_approx_sims(test_data):
     num_iters = 3
@@ -400,13 +401,7 @@ def localmd_decomposition(filename, block_sizes, overlap, frame_range, max_compo
 
     pairs = []
     
-    results = []
-    results.append(np.zeros((0, block_sizes[0],block_sizes[1], max_components), dtype=dtype))
-    results.append(np.zeros((0, max_components), dtype=dtype))
-    results.append(np.zeros((0, max_components, len(frames)), dtype=dtype))
-    
     cumulator_count = 0
-    # max_cumulator = batching
 
     dim_1_iters = list(range(0, data.shape[0] - block_sizes[0] + 1, block_sizes[0] - overlap[0]))
     if dim_1_iters[-1] != data.shape[0] - block_sizes[0] and data.shape[0] - block_sizes[0] != 0:
@@ -416,19 +411,7 @@ def localmd_decomposition(filename, block_sizes, overlap, frame_range, max_compo
     if dim_2_iters[-1] != data.shape[1] - block_sizes[1] and data.shape[1] - block_sizes[1] != 0:
         dim_2_iters.append(data.shape[1] - block_sizes[1])
 
-    for k in dim_1_iters:
-        for j in dim_2_iters:
-            pairs.append((k, j))
-            subset = data[k:k+block_sizes[0], j:j+block_sizes[1], :].astype(dtype)
-            projected_data = np.random.randn(subset.shape[2], max_components).astype(dtype)
-            new_results = single_block_md(subset, projected_data, spatial_thres, temporal_thres, 1)
-            new_results = cast_decomposition_results(new_results, dtype)
-            results = append_decomposition_results(results, new_results)    
 
-
-
-    #Step 2e: Piece it all together into one orthonormal matrix (U-matrix)
-    display("Collating results into large spatial basis matrix and projecting data")
     #Define the block weighting matrix
     block_weights = np.ones((block_sizes[0], block_sizes[1]), dtype=dtype)
     hbh = block_sizes[0] // 2
@@ -440,27 +423,46 @@ def localmd_decomposition(filename, block_sizes, overlap, frame_range, max_compo
     )
     block_weights[:hbh, hbw:] = np.fliplr(block_weights[:hbh, :hbw])
     block_weights[hbh:, :] = np.flipud(block_weights[:hbh, :])
+        
+    sparse_indices = np.arange(data.shape[0]*data.shape[1]).reshape((data.shape[0], data.shape[1]), order=order)
+    row_number = 0
+    column_indices = []
+    row_indices = []
+    spatial_overall_values = []
+    for k in dim_1_iters:
+        for j in dim_2_iters:
+            pairs.append((k, j))
+            subset = data[k:k+block_sizes[0], j:j+block_sizes[1], :].astype(dtype)
+            projected_data = np.random.randn(subset.shape[2], max_components).astype(dtype)
+            spatial_comps, decisions, _ = single_block_md(subset, projected_data, spatial_thres, temporal_thres, 1)
+            spatial_comps = spatial_comps.astype(dtype)
 
+            dim_1_val = k
+            dim_2_val = j
 
+            decisions = decisions.flatten()
 
-    final_matrix = np.zeros((data.shape[0], data.shape[1], 0), dtype=dtype)
-    for i in range(len(pairs)):
-        dim_1_val = pairs[i][0]
-        dim_2_val = pairs[i][1]
+            spatial_cropped = spatial_comps[:, :, decisions > 0]
+            spatial_cropped = spatial_cropped * block_weights[:, :, None]
+            
+            sparse_col_indices = sparse_indices[k:k+block_sizes[0], j:j+block_sizes[1]][:, :, None]
+            
+            sparse_col_indices = sparse_col_indices + np.zeros((1, 1, spatial_cropped.shape[2]))
+            sparse_row_indices = np.zeros_like(sparse_col_indices)
+            addend = np.arange(row_number, row_number+spatial_cropped.shape[2])[None, None, :]
+            sparse_row_indices = sparse_row_indices + addend
+            
+            sparse_col_indices_f = sparse_col_indices.flatten().tolist()
+            sparse_row_indices_f = sparse_row_indices.flatten().tolist()
+            spatial_values_f = spatial_cropped.flatten().tolist()
+            
+            column_indices.extend(sparse_col_indices_f)
+            row_indices.extend(sparse_row_indices_f)
+            spatial_overall_values.extend(spatial_values_f)
 
-        spatial_comps = results[0][i, :, :, :]
-        decisions = results[1][i, :].flatten()
-
-        spatial_cropped = spatial_comps[:, :, decisions > 0]#.reshape((block_sizes[0], block_sizes[1], -1), order=order)
-        spatial_cropped = spatial_cropped * block_weights[:, :, None]
-        appendage = np.zeros((data.shape[0], data.shape[1], spatial_cropped.shape[2]), dtype=dtype)
-        appendage[dim_1_val:dim_1_val + block_sizes[0], dim_2_val:dim_2_val + block_sizes[1], :] = spatial_cropped
-        final_matrix = np.concatenate([final_matrix, appendage], axis = 2)
-
+            row_number += spatial_cropped.shape[2]
     
-
-    U_r = final_matrix.reshape((data.shape[0]*data.shape[1], -1), order=order)
-    U_r = scipy.sparse.csr_matrix(U_r)
+    U_r = scipy.sparse.coo_matrix((spatial_overall_values, (column_indices, row_indices)), shape=(data.shape[0]*data.shape[1], row_number))
     projector = get_projector(U_r)
 
     ## Step 2f: Do sparse regression to get the V matrix: 

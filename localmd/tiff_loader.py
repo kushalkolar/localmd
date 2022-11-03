@@ -262,9 +262,16 @@ class tiff_loader():
         return np.array(overall_normalizer, dtype=self.dtype)
         
     def temporal_crop_standardized(self, frames):
+        start_time = time.time()
         crop_data = self.temporal_crop(frames)
+        print("the temporal crop step took {}".format(time.time() - start_time))
+        start_time = time.time()
         crop_data -= self.mean_img[:, :, None]
+        print("the mean subtraction step took {}".format(time.time() - start_time))
+        start_time = time.time()
         crop_data /= self.std_img[:, :, None]
+        print("the crop step took {}".format(time.time() - start_time))
+        start_time = time.time()
         
         return crop_data.astype(self.dtype)
 
@@ -276,35 +283,6 @@ class tiff_loader():
         crop_data = self.temporal_crop_standardized(random_data)
         projection_data = np.random.randn(crop_data.shape[-1], int(self.background_rank)).astype(self.dtype)
         spatial_basis, _ = truncated_random_svd(crop_data.reshape((-1, crop_data.shape[-1]), order=self.order), projection_data)        
-
-#         '''
-#         Given orthonormal spatial basis, we calculuate the temporal basis as: 
-#         s^t * (Data - mean * 1^t) / stdv
-#         '''
-        
-#         stdv_reshape = self.std_img.reshape((1, -1), order=self.order)
-#         spatial_basis_scaled = spatial_basis.T / stdv_reshape 
-        
-#         scaled_spatial_mean = spatial_basis_scaled.dot(self.mean_img.reshape((-1, 1), order=self.order)) #This is s^t/stdv * mean. Shape bg_rank x 1 
-        
-#         #Given orthonormal spatial basis, we now calculate the temporal basis
-#         temporal_basis = np.zeros((spatial_basis.shape[1], self.shape[2]))
-#         display("Calculating temporal background basis")
-        
-        
-        
-#         start = 0
-#         for i, data in enumerate(tqdm(self.loader), 0):
-#             data = np.array(data).squeeze().transpose(1,2,0)
-#             crop_data= data.reshape((-1, data.shape[2]), order=self.order)
-#             prod = np.array(jnp.matmul(spatial_basis_scaled, crop_data))
-#             endpt = min(temporal_basis.shape[1], start+prod.shape[1])
-#             temporal_basis[:, start:endpt] = prod
-#             start = endpt
-            
-        
-#         temporal_basis -= scaled_spatial_mean
-        # return (spatial_basis.astype(self.dtype), temporal_basis.astype(self.dtype))
         return spatial_basis.astype(self.dtype)
 
     def V_projection(self, M):
@@ -361,11 +339,8 @@ class tiff_loader():
 
     def temporal_crop_with_filter(self, frames):
         crop_data = self.temporal_crop_standardized(frames)
-
         crop_data_r = crop_data.reshape((-1, crop_data.shape[2]), order=self.order)
         temporal_basis_crop = self.spatial_basis.T.dot(crop_data_r) #Given standardized data, this is the linear subspace projection (spatial basis has orthonormal cols)
-        
-        
         spatial_r = self.spatial_basis.reshape((self.shape[0], self.shape[1], self.spatial_basis.shape[1]), order=self.order)
         return np.array(filter_components(crop_data, spatial_r, temporal_basis_crop))
   
