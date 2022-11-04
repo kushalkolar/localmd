@@ -257,7 +257,7 @@ class random_projection_dataset():
 def regular_collate(batch):
     return batch[0]
 
-def threshold_heuristic(block_sizes, num_comps = 3, iters=50, percentile_threshold = 5):
+def threshold_heuristic(block_sizes, num_comps = 3, iters=50, percentile_threshold = 5, num_workers=None):
     '''
     We simulate the roughness statistics for components when we fit to standard normal noise
     Inputs: 
@@ -274,9 +274,10 @@ def threshold_heuristic(block_sizes, num_comps = 3, iters=50, percentile_thresho
     
     random_dataobj = random_projection_dataset(iters, (d1,d2,T), num_comps)
 
-    num_cpu = multiprocessing.cpu_count()
-    num_workers = min(len(random_dataobj), num_cpu-1)
-    num_workers = max(num_workers, 0)
+    if num_workers is None:
+        num_cpu = multiprocessing.cpu_count()
+        num_workers = min(len(random_dataobj), num_cpu-1)
+        num_workers = max(num_workers, 0)
     loader = torch.utils.data.DataLoader(random_dataobj, batch_size=1,
                                              shuffle=False, num_workers=num_workers, collate_fn=regular_collate, timeout=0)
     for i, data in enumerate(tqdm(loader), 0):
@@ -376,8 +377,8 @@ def factored_svd(spatial_components, temporal_components):
     return mixing_weights, singular_values, temporal_basis  # R, s, Vt
 
 
-def localmd_decomposition(filename, block_sizes, overlap, frame_range, max_components=50, background_rank=15, sim_conf=5, batching=10, tiff_batch_size = 10000, dtype='float32', order="F"):
-    load_obj = tiff_loader(filename, dtype=dtype, center=True, normalize=True, background_rank=background_rank, batch_size=tiff_batch_size, order=order)
+def localmd_decomposition(filename, block_sizes, overlap, frame_range, max_components=50, background_rank=15, sim_conf=5, batching=10, tiff_batch_size = 10000, dtype='float32', order="F", num_workers=0):
+    load_obj = tiff_loader(filename, dtype=dtype, center=True, normalize=True, background_rank=background_rank, batch_size=tiff_batch_size, order=order, num_workers=num_workers)
     start = frame_range[0]
     end = frame_range[1]
     end = min(end, load_obj.shape[2])
@@ -387,7 +388,7 @@ def localmd_decomposition(filename, block_sizes, overlap, frame_range, max_compo
     
     ##Step 2a: Get the spatial and temporal thresholds
     display("Running Simulations")
-    spatial_thres, temporal_thres = threshold_heuristic([block_sizes[0], block_sizes[1], len(frames)], num_comps = 1, iters=250, percentile_threshold=sim_conf)
+    spatial_thres, temporal_thres = threshold_heuristic([block_sizes[0], block_sizes[1], len(frames)], num_comps = 1, iters=250, percentile_threshold=sim_conf, num_workers=num_workers)
     
     ##Step 2b: Load the data you will do blockwise SVD on
     display("Loading Data")

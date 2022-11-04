@@ -125,7 +125,7 @@ class tiff_dataset():
 
 
 class tiff_loader():
-    def __init__(self, filename, dtype='float32', center=True, normalize=True, background_rank=15, batch_size=2000, order="F"):
+    def __init__(self, filename, dtype='float32', center=True, normalize=True, background_rank=15, batch_size=2000, order="F", num_workers = None):
         with tifffile.TiffFile(filename) as tffl: 
             if len(tffl.pages) == 1: 
                 raise ValueError("PMD does not accept single-page tiff datasets. Instead, pass your raw through the pipeline starting from the motion correction step.")
@@ -137,9 +137,10 @@ class tiff_loader():
         
         #Define the tiff loader
         self.tiff_dataobj = tiff_dataset(self.filename, self.batch_size)
-        num_cpu = multiprocessing.cpu_count()
-        num_workers = min(num_cpu - 1, len(self.tiff_dataobj))
-        num_workers = max(num_workers, 0)
+        if num_workers is None:
+            num_cpu = multiprocessing.cpu_count()
+            num_workers = min(num_cpu - 1, len(self.tiff_dataobj))
+            num_workers = max(num_workers, 0)
 
         
         self.loader = torch.utils.data.DataLoader(self.tiff_dataobj, batch_size=1,
