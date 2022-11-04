@@ -140,7 +140,6 @@ class tiff_loader():
         num_cpu = multiprocessing.cpu_count()
         num_workers = min(num_cpu - 1, len(self.tiff_dataobj))
         num_workers = max(num_workers, 0)
-        os.system('taskset -cp 0-%d %s > /dev/null' % (num_cpu, os.getpid()))
 
         
         self.loader = torch.utils.data.DataLoader(self.tiff_dataobj, batch_size=1,
@@ -262,16 +261,9 @@ class tiff_loader():
         return np.array(overall_normalizer, dtype=self.dtype)
         
     def temporal_crop_standardized(self, frames):
-        start_time = time.time()
         crop_data = self.temporal_crop(frames)
-        print("the temporal crop step took {}".format(time.time() - start_time))
-        start_time = time.time()
         crop_data -= self.mean_img[:, :, None]
-        print("the mean subtraction step took {}".format(time.time() - start_time))
-        start_time = time.time()
         crop_data /= self.std_img[:, :, None]
-        print("the crop step took {}".format(time.time() - start_time))
-        start_time = time.time()
         
         return crop_data.astype(self.dtype)
 
