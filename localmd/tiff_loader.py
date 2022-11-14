@@ -30,6 +30,7 @@ import time
 import datetime
 import sys
 
+import math
 
 import jax
 import jax.scipy
@@ -125,7 +126,7 @@ class tiff_dataset():
 
 
 class tiff_loader():
-    def __init__(self, filename, dtype='float32', center=True, normalize=True, background_rank=15, batch_size=2000, order="F", num_workers = None):
+    def __init__(self, filename, dtype='float32', center=True, normalize=True, background_rank=15, batch_size=2000, order="F", num_workers = None, pixel_batch_size=5000):
         with tifffile.TiffFile(filename) as tffl: 
             if len(tffl.pages) == 1: 
                 raise ValueError("PMD does not accept single-page tiff datasets. Instead, pass your raw through the pipeline starting from the motion correction step.")
@@ -134,6 +135,7 @@ class tiff_loader():
         self.dtype = dtype
         self.shape = self._get_shape()
         self._estimate_batch_size(frame_const=batch_size)
+        self.pixel_batch_size=pixel_batch_size
         
         #Define the tiff loader
         self.tiff_dataobj = tiff_dataset(self.filename, self.batch_size)
@@ -203,15 +205,8 @@ class tiff_loader():
             results = self._calculate_mean_and_normalizer()
             self.mean_img = results[0]
             self.std_img = results[1]
-        elif self.center: 
-            self.mean_img = self._calculate_mean()
-            self.std_img = np.ones((self.shape[0], self.shape[1])).astype(self.dtype) 
-        elif self.normalize:
-            self.std_img = self._calculate_normalizer()
-            self.mean_img = np.zeros((self.shape[0], self.shape[1])).astype(self.dtype)
         else:
-            self.mean_img = np.zeros((self.shape[0], self.shape[1])).astype(self.dtype)
-            self.std_img = np.ones((self.shape[0], self.shape[1])).astype(self.dtype) 
+            raise ValueError("Method now requires normalization and centering")
         return self.mean_img, self.std_img
     
     def _initialize_all_background(self):
@@ -235,18 +230,27 @@ class tiff_loader():
         same time, to avoid doing them separately
         '''
         display("Calculating mean and noise variance")
-        overall_mean = jnp.zeros((self.shape[0], self.shape[1]))
+        overall_mean = np.zeros((self.shape[0], self.shape[1]))
         overall_normalizer = np.zeros((self.shape[0], self.shape[1]), dtype=self.dtype)
         num_frames = self.shape[2]
+        
+        divisor = math.ceil(math.sqrt(self.shape[0]))
+        dim1_range_start_pts = np.arange(0, self.shape[0] - divisor, divisor)
+        dim1_range_start_pts = np.concatenate([dim1_range_start_pts, [self.shape[0] - divisor]], axis = 0)
+        dim2_range_start_pts = np.arange(0, self.shape[1] - divisor, divisor)
+        dim2_range_start_pts = np.concatenate([dim2_range_start_pts, [self.shape[1] - divisor]], axis = 0)
+        
         for i, data in enumerate(tqdm(self.loader), 0):
-            crop_data = jnp.array(data).squeeze().transpose(1,2,0)
-            mean_value, noise_est_2d = get_mean_and_noise(crop_data, num_frames)
-            overall_mean = overall_mean + mean_value
-            overall_normalizer += np.array(noise_est_2d)
+            for step1 in dim1_range_start_pts:
+                for step2 in dim2_range_start_pts:
+                    crop_data = data.squeeze()[:, step1:step1+divisor, step2:step2+divisor].transpose(1,2,0)
+                    mean_value, noise_est_2d = get_mean_and_noise(crop_data, num_frames)
+                    overall_mean[step1:step1+divisor, step2:step2+divisor] += np.array(mean_value)
+                    overall_normalizer[step1:step1+divisor, step2:step2+divisor] += np.array(noise_est_2d)
         overall_normalizer /= len(self.tiff_dataobj)
         overall_normalizer[overall_normalizer==0] = 1
         display("Finished mean and noise variance")
-        return np.array(overall_mean, dtype=self.dtype), overall_normalizer
+        return overall_mean.astype(self.dtype), overall_normalizer
     
     
     def _calculate_normalizer(self):
