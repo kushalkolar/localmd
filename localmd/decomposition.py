@@ -294,14 +294,38 @@ def threshold_heuristic(block_sizes, num_comps = 3, iters=50, percentile_thresho
     return spatial_thres, temporal_thres
 
 
-
-@partial(jit)
+@jit
+def filter_and_decompose(block,mean_img, std_img,spatial_basis, projection_data,  spatial_thres, temporal_thres, max_consec_failures):
+    '''
+    Inputs: 
+    block: jnp.ndarray. Dimensions (block_1, block_2, T). (block_1, block_2) are the dimensions of this patch of data, T is the number of frames.
+    mean_img: jnp.ndarray. Dimensions (block_1, block_2). Mean image of this block (over entire dataset, not just the "T" frames this block contains). 
+    std_img: jnp.ndarray. Dimensions (block_1, block_2). Nosie variance image of this block (over the entire dataset, not just the "T" frames this block contains). 
+    spatial_basis: jnp.ndarray. Dimensions (block_1, block_2, svd_dim). Here, svd_dim is the dimension of the whole FOV svd we perform before doing the localized SVD on each spatial patch. 
+    projection_data: jnp.ndarray. Dimensions (T, max_dimension). Used for the fast approximate SVD method.
+    spatial_thres: float. Threshold used to determine whether an estimated spatial component from the SVD is just noise or contains useful signal
+    temporal_thres: float. Threshold used to determine whether an estimated temporal component from the SVD is just noise or not.
+    max_consec_failures: int, usually 1. After doing the truncated SVD, we iterate over the components, from most to least significant, and 
+    '''
+    
+    ##Step 1: Standardize the data
+    block -= mean_img[:, :, None]
+    block /= std_img[:, :, None]
+    
+    #Step 2: Get the temporal basis for the full FOV decomposition: 
+    temporal_basis = jnp.tensordot(jnp.transpose(spatial_basis, axes=(2,0,1)), block, axes=((1,2), (0,1)))
+    block = block - jnp.tensordot(spatial_basis, temporal_basis, axes=((2), (0)))
+    
+    return single_block_md(block, projection_data, spatial_thres, temporal_thres, max_consec_failures)
+    
+# @partial(jit)
 def single_block_md(block, projection_data, spatial_thres, temporal_thres, max_consec_failures):
     '''
     Matrix Decomposition function for all blocks. 
     Inputs: 
-        block: jnp.array. Dimensions (block_1, block_2, T). We assume that this data has already been centered and noise-normalized
-    
+        block: jnp.array. Dimensions (block_1, block_2, T). (block_1, block_2) are the dimensions of this patch of data, T is the number of frames. We assume that this data has already been centered and noise-normalized
+        projection_data: jnp.array. Dimensions (T, max_dimension). Used for the fast approximate SVD method.
+        
     '''
     #TODO: Get rid of max consec failures entirely from function API 
     # block = standardize_block(block) #Center and divide by noise standard deviation before doing matrix decomposition
@@ -392,7 +416,10 @@ def localmd_decomposition(filename, block_sizes, overlap, frame_range, max_compo
     
     ##Step 2b: Load the data you will do blockwise SVD on
     display("Loading Data")
-    data = load_obj.temporal_crop_with_filter(frames)
+    data = load_obj.temporal_crop(frames)
+    data_std_img = load_obj.std_img #(d1, d2) shape
+    data_mean_img = load_obj.mean_img #(d1, d2) shape
+    data_spatial_basis = load_obj.spatial_basis.reshape((load_obj.shape[0], load_obj.shape[1], -1), order=load_obj.order)
     
     ##Step 2c: Run PMD and get the U matrix components
     display("Obtaining blocks and running local SVD")
@@ -435,7 +462,11 @@ def localmd_decomposition(filename, block_sizes, overlap, frame_range, max_compo
             pairs.append((k, j))
             subset = data[k:k+block_sizes[0], j:j+block_sizes[1], :].astype(dtype)
             projected_data = np.random.randn(subset.shape[2], max_components).astype(dtype)
-            spatial_comps, decisions, _ = single_block_md(subset, projected_data, spatial_thres, temporal_thres, 1)
+            crop_mean_img = data_mean_img[k:k+block_sizes[0], j:j+block_sizes[1]]
+            crop_std_img = data_std_img[k:k+block_sizes[0], j:j+block_sizes[1]]
+            crop_spatial_basis = data_spatial_basis[k:k+block_sizes[0], j:j+block_sizes[1], :]
+            spatial_comps, decisions, _ = filter_and_decompose(subset, crop_mean_img, crop_std_img, crop_spatial_basis, projected_data, spatial_thres, temporal_thres, 1)
+            # spatial_comps, decisions, _ = single_block_md(subset, projected_data, spatial_thres, temporal_thres, 1)
             spatial_comps = spatial_comps.astype(dtype)
 
             dim_1_val = k

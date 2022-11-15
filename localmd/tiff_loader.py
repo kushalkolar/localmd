@@ -241,12 +241,17 @@ class tiff_loader():
         dim2_range_start_pts = np.concatenate([dim2_range_start_pts, [self.shape[1] - divisor]], axis = 0)
         
         for i, data in enumerate(tqdm(self.loader), 0):
+            mean_value_net = np.zeros((self.shape[0], self.shape[1]))
+            normalizer_net = np.zeros((self.shape[0], self.shape[1]))
             for step1 in dim1_range_start_pts:
                 for step2 in dim2_range_start_pts:
                     crop_data = data.squeeze()[:, step1:step1+divisor, step2:step2+divisor].transpose(1,2,0)
                     mean_value, noise_est_2d = get_mean_and_noise(crop_data, num_frames)
-                    overall_mean[step1:step1+divisor, step2:step2+divisor] += np.array(mean_value)
-                    overall_normalizer[step1:step1+divisor, step2:step2+divisor] += np.array(noise_est_2d)
+                    mean_value_net[step1:step1+divisor, step2:step2+divisor] = np.array(mean_value)
+                    normalizer_net[step1:step1+divisor, step2:step2+divisor] = np.array(noise_est_2d)
+                    
+            overall_mean += mean_value_net
+            overall_normalizer += normalizer_net
         overall_normalizer /= len(self.tiff_dataobj)
         overall_normalizer[overall_normalizer==0] = 1
         display("Finished mean and noise variance")
