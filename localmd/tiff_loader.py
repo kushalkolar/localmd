@@ -65,7 +65,7 @@ def truncated_random_svd(input_matrix, random_data):
     
 
 def regular_collate(batch):
-    return np.array(batch)
+    return batch[0]
 
 class TiffLoader(torch.utils.data.DataLoader):
     def __init__(self, dataset, batch_size=1,
@@ -87,12 +87,12 @@ class TiffLoader(torch.utils.data.DataLoader):
 
 
 class tiff_dataset():
-    def __init__(self, filename, batch_size):
+    def __init__(self, filename, batch_size, frame_corrector=None):
         self.filename = filename
         self.shape = self._get_shape()
         self.chunks = math.ceil(self.shape[2]/batch_size)
         self.batch_size = batch_size
-        
+        self.frame_corrector = frame_corrector
         
         
     def __len__(self):
@@ -120,13 +120,17 @@ class tiff_dataset():
             data= tifffile.imread(self.filename, key=keys)
         else:
             raise ValueError
+        if self.frame_corrector is not None:
+            data = self.frame_corrector.register_frames(data.astype("float32"))
+        else:
+            data = [data]
         return data
     
 
 
 
 class tiff_loader():
-    def __init__(self, filename, dtype='float32', center=True, normalize=True, background_rank=15, batch_size=2000, order="F", num_workers = None, pixel_batch_size=5000):
+    def __init__(self, filename, dtype='float32', center=True, normalize=True, background_rank=15, batch_size=2000, order="F", num_workers = None, pixel_batch_size=5000, frame_corrector_obj = None):
         with tifffile.TiffFile(filename) as tffl: 
             if len(tffl.pages) == 1: 
                 raise ValueError("PMD does not accept single-page tiff datasets. Instead, pass your raw through the pipeline starting from the motion correction step.")
@@ -136,9 +140,10 @@ class tiff_loader():
         self.shape = self._get_shape()
         self._estimate_batch_size(frame_const=batch_size)
         self.pixel_batch_size=pixel_batch_size
+        self.frame_corrector = frame_corrector_obj
         
         #Define the tiff loader
-        self.tiff_dataobj = tiff_dataset(self.filename, self.batch_size)
+        self.tiff_dataobj = tiff_dataset(self.filename, self.batch_size, frame_corrector = self.frame_corrector)
         if num_workers is None:
             num_cpu = multiprocessing.cpu_count()
             num_workers = min(num_cpu - 1, len(self.tiff_dataobj))
@@ -192,8 +197,14 @@ class tiff_loader():
         Returns: 
             Array containing this data
         '''
-        x = tifffile.imread(self.filename, key=frames).transpose(1,2,0)
-        return x.astype(self.dtype)
+        if self.frame_corrector is not None:
+            x = tifffile.imread(self.filename, key=frames).astype("float32")
+            reg = np.concatenate(self.frame_corrector.register_frames(x), axis = 0)
+            return reg.transpose(1,2,0)
+        else:
+            return tifffile.imread(self.filename, key=frames).transpose(1,2,0).astype(self.dtype)
+
+        
         
         
     def _initialize_all_normalizers(self):
@@ -241,11 +252,12 @@ class tiff_loader():
         dim2_range_start_pts = np.concatenate([dim2_range_start_pts, [self.shape[1] - divisor]], axis = 0)
         
         for i, data in enumerate(tqdm(self.loader), 0):
+            data = np.array(jnp.concatenate(data, axis = 0))
             mean_value_net = np.zeros((self.shape[0], self.shape[1]))
             normalizer_net = np.zeros((self.shape[0], self.shape[1]))
             for step1 in dim1_range_start_pts:
                 for step2 in dim2_range_start_pts:
-                    crop_data = data.squeeze()[:, step1:step1+divisor, step2:step2+divisor].transpose(1,2,0)
+                    crop_data = data.squeeze()[:, step1:step1+divisor, step2:step2+divisor].transpose(1,2,0).astype("float32")
                     mean_value, noise_est_2d = get_mean_and_noise(crop_data, num_frames)
                     mean_value_net[step1:step1+divisor, step2:step2+divisor] = np.array(mean_value)
                     normalizer_net[step1:step1+divisor, step2:step2+divisor] = np.array(noise_est_2d)
@@ -287,6 +299,57 @@ class tiff_loader():
         spatial_basis, _ = truncated_random_svd(crop_data.reshape((-1, crop_data.shape[-1]), order=self.order), projection_data)        
         return spatial_basis.astype(self.dtype)
 
+    def V_projection_old(self, M):
+        '''
+        This function does two things, at a high level: 
+        (1) It projects the standardized data onto U (via multiplication by M)
+        (2) It calculates the temporal component from the full FOV SVD component as it does this
+        
+        Efficient batch matmul for sparse regression
+        Assumption: M has a small number of rows (and many columns). It is R x d, where R is the
+        rank of the decomposition and d is the number of pixels in the movie
+        Here we compute M(D - a_1a_2 - mean)/stdv. We break the computation into temporal subsets, so if the dataset is T frames, we compute this product T' frames at a time (where T' usually around 1 or 2K) 
+        R = Rank of PMD Decomposition
+        d = number of pixels in dataset
+        T = number of frames in dataset
+        T' = number of frames we load at a time in below for loop
+        p_r = rank of whole FOV SVD (self.spatial_basis.shape[1]). Typically very small, around 15
+        
+        
+        M: Projection matrix given as input: it is R x T'
+        D: The loaded dataset: dimensions d x T'
+        a1 = spatial basis (self.spatial_basis): dimensions d x p_r
+        a2 = temporal basis subset (calculation provided below): dimensions p_r x T'
+        mean = mean of data (from self.mean_image -- it is reshaped to d x 1 here
+        stdv = noise variance of data (from self.std_img -- it is reshaped to 1 x d here
+        
+        First: need to find a_2. To do so, compute: 
+        a1^T(D - mean)/stdv. Most efficient way: first find a1^TD, 
+        '''
+        
+        result = np.zeros((M.shape[0], self.shape[2]), dtype=self.dtype)
+        mean_img_r = self.mean_img.reshape((-1, 1), order=self.order)
+        std_img_r = self.std_img.reshape((1, -1), order=self.order)
+        start = 0
+        temporal_basis = np.zeros((self.spatial_basis.shape[1], self.shape[2]), dtype=self.dtype)
+
+        start = 0
+        for i, data in enumerate(tqdm(self.loader), 0):
+            # data = np.array(data).squeeze().transpose(1,2,0)
+            num_frames_chunk = data.shape[1]
+            # D = data.reshape((-1, data.shape[2]), order=self.order)
+            
+            temporal_basis_chunk, output = V_projection_routine(self.order, M, data, self.spatial_basis, mean_img_r, std_img_r)
+            
+            endpt = min(self.shape[2], start+num_frames_chunk)
+            result[:, start:endpt] = np.array(output).astype(self.dtype)
+            temporal_basis[:, start:endpt] = np.array(temporal_basis_chunk).astype(self.dtype)
+            start = endpt
+            
+
+        self.temporal_basis = temporal_basis
+        return result  
+    
     def V_projection(self, M):
         '''
         This function does two things, at a high level: 
@@ -323,22 +386,21 @@ class tiff_loader():
 
         start = 0
         for i, data in enumerate(tqdm(self.loader), 0):
-            data = np.array(data).squeeze().transpose(1,2,0)
-            num_frames_chunk = data.shape[2]
-            D = data.reshape((-1, data.shape[2]), order=self.order)
-            
-            temporal_basis_chunk, output = V_projection_routine(M, D, self.spatial_basis, mean_img_r, std_img_r)
+
+            temporal_basis_chunk, output = V_projection_routine(self.order, M, data, self.spatial_basis, mean_img_r, std_img_r)
+            num_frames_chunk = output.shape[1]
             
             endpt = min(self.shape[2], start+num_frames_chunk)
             result[:, start:endpt] = np.array(output).astype(self.dtype)
             temporal_basis[:, start:endpt] = np.array(temporal_basis_chunk).astype(self.dtype)
             start = endpt
-            
+
 
         self.temporal_basis = temporal_basis
         return result  
-    
 
+    
+    #No longer used
     def temporal_crop_with_filter(self, frames):
         crop_data = self.temporal_crop_standardized(frames)
         crop_data_r = crop_data.reshape((-1, crop_data.shape[2]), order=self.order)
@@ -359,8 +421,12 @@ def get_temporal_basis(D, spatial_basis, mean_img_r, std_img_r):
 
     
 
-@partial(jit)
-def V_projection_routine(M, D, spatial_basis, mean_img_r, std_img_r):
+@partial(jit, static_argnums=(0))
+def V_projection_routine(order, M, D, spatial_basis, mean_img_r, std_img_r):
+    D = jnp.concatenate(D, axis =0)
+    D = jnp.squeeze(D)
+    D = jnp.transpose(D, (1,2,0))
+    D = jnp.reshape(D, (-1, D.shape[2]), order=order)
     M = M/std_img_r
     temporal_basis_chunk = get_temporal_basis(D, spatial_basis, mean_img_r, std_img_r)
     MD = jnp.matmul(M, D)
