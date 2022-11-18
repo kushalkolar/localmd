@@ -235,64 +235,38 @@ def decomposition_no_normalize(block):
 decomposition_no_normalize_vmap = jit(vmap(decomposition_no_normalize, in_axes = (3)))
 
 
-class random_projection_dataset():
-    def __init__(self, iters, dims, num_comps):
-        if iters <= 0:
-            raise ValueError("need a nonnegative number of iterations")
-        self.iters = iters
-        self.d1, self.d2, self.T = dims
-        self.num_comps = num_comps
-        
-        
-        
-    def __len__(self):
-        return self.iters
+
+@partial(jit, static_argnums=(0,1,2,3))
+def make_matrix(d1, d2, T, num_comps, key):
+    noise_data = jax.random.normal(key, (d1, d2, T))
+    random_projection = jax.random.normal(key, (T, num_comps))
     
-    
-    def __getitem__(self, index):
-        noise_data = np.random.randn(self.d1, self.d2, self.T)
-        random_projection = np.random.randn(self.T, self.num_comps)
-        return (noise_data, random_projection)
+    return noise_data, random_projection
   
-def regular_collate(batch):
-    return batch[0]
+@partial(jit, static_argnums=(0,1,2,3))
+def rank_simulation(d1, d2, T, num_comps, key):
+    noise_data, random_projection = make_matrix(d1, d2, T, num_comps, key)
+    spatial, temporal = decomposition_no_normalize_approx(noise_data, random_projection)
+    return spatial, temporal
 
-def threshold_heuristic(block_sizes, num_comps = 3, iters=50, percentile_threshold = 5, num_workers=None):
-    '''
-    We simulate the roughness statistics for components when we fit to standard normal noise
-    Inputs: 
-        block_sizes: tuple, dimensions of block: d1, d2, T, where d1 and d2 are the dimensions of the block on the FOV and T is the window length
-        num_comps: positive integer. Number of components we fit for each (0,1)-random noise dataset
-        iters: default parameter, int. Number of times we do this procedure on the GPU. This param is really to avoid memorry blowups on the GPU
-        num_sims: default parameter, int. 
-    Outputs: 
-        spatial_thresh, temporal_thresh. The spatial and temporal statistics
-    '''
-    d1, d2, T = block_sizes
-    spatial_cumulator = np.zeros((0,))
-    temporal_cumulator = np.zeros((0, ))
+
+def threshold_heuristic(dimensions, num_comps=1, iters = 250, percentile_threshold =5):
+
+    ii32 = np.iinfo(np.int32)
+    spatial_list = []
+    temporal_list = []
     
-    random_dataobj = random_projection_dataset(iters, (d1,d2,T), num_comps)
+    d1, d2, T = dimensions
+    for k in range(iters):
+        prng_input = np.random.randint(low=ii32.min, high=ii32.max,size=1, dtype=np.int32)[0]
+        key = jax.random.PRNGKey(prng_input)
+        x, y = rank_simulation(d1, d2, T, num_comps, key)
+        spatial_list.append(x)
+        temporal_list.append(y)
 
-    if num_workers is None:
-        num_cpu = multiprocessing.cpu_count()
-        num_workers = min(len(random_dataobj), num_cpu-1)
-        num_workers = max(num_workers, 0)
-    loader = torch.utils.data.DataLoader(random_dataobj, batch_size=1,
-                                             shuffle=False, num_workers=num_workers, collate_fn=regular_collate, timeout=0)
-    for i, data in enumerate(tqdm(loader), 0):
-        noise_data, random_projection = data
-
-        spatial_temp, temporal_temp = decomposition_no_normalize_approx(noise_data, random_projection)
-
-        spatial_cumulator = np.concatenate([spatial_cumulator, spatial_temp])
-        temporal_cumulator = np.concatenate([temporal_cumulator, temporal_temp])
-
-    spatial_thres = np.percentile(spatial_cumulator.flatten(), percentile_threshold)
-    temporal_thres = np.percentile(temporal_cumulator.flatten(), percentile_threshold)
-    
+    spatial_thres = np.percentile(np.array(spatial_list).flatten(), percentile_threshold)
+    temporal_thres = np.percentile(np.array(temporal_list).flatten(), percentile_threshold)
     return spatial_thres, temporal_thres
-
 
 @jit
 def filter_and_decompose(block,mean_img, std_img,spatial_basis, projection_data,  spatial_thres, temporal_thres, max_consec_failures):
@@ -412,7 +386,7 @@ def localmd_decomposition(filename, block_sizes, overlap, frame_range, max_compo
     
     ##Step 2a: Get the spatial and temporal thresholds
     display("Running Simulations")
-    spatial_thres, temporal_thres = threshold_heuristic([block_sizes[0], block_sizes[1], len(frames)], num_comps = 1, iters=250, percentile_threshold=sim_conf, num_workers=num_workers)
+    spatial_thres, temporal_thres = threshold_heuristic([block_sizes[0], block_sizes[1], len(frames)], num_comps = 1, iters=250, percentile_threshold=sim_conf)
     
     ##Step 2b: Load the data you will do blockwise SVD on
     display("Loading Data")
