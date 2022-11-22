@@ -130,7 +130,23 @@ class tiff_dataset():
 
 
 class tiff_loader():
-    def __init__(self, filename, dtype='float32', center=True, normalize=True, background_rank=15, batch_size=2000, order="F", num_workers = None, pixel_batch_size=5000, frame_corrector_obj = None):
+    def __init__(self, filename, dtype='float32', center=True, normalize=True, background_rank=15, batch_size=2000, order="F", num_workers = None, pixel_batch_size=5000, frame_corrector_obj = None, num_samples = 8):
+        '''
+        Inputs: 
+            filename: string. describing path to multipage tiff file to be denoised
+            dtype: np.dtype. intended format of data
+            center: bool. whether or not to center the data before denoising
+            normalize: bool. whether or not noise normalize the data
+            background_rank: int. we run an approximate truncated svd on the full FOV of the data, of rank 'background_rank'. We subtract this from the data before running the core matrix decomposition compression method
+            batch_size: max number of frames to load into memory (CPU and GPU) at a time
+            order: the order (either "C" or "F") in which we reshape 2D data into 3D videos and vice versa
+            num_workers: int, keep it at 0 for now. Number of workers used in pytorch dataloading. Experimental and best kept at 0. 
+            pixel_batch_size: int. maximum number of pixels of data we load onto GPU at any point in time
+            frame_corrector_obj: jnormcorre frame corrector object. This is used to register loaded data on the fly. So in a complete pipeline, like the maskNMF pipeline, we can load data, correct it on the fly, and compress it. Avoids the need to explicitly rewrite the data onto disk during registration. 
+            num_samples: int. when we estimate mean and noise variance, we take 8 samples of the data, each sample has 'batch_size' number of continuous frames. If there are fewer than num_samples * batch_size frames in the dataset, we just sequentially load the entire dataset to get these estimates. 
+        
+        
+        '''
         with tifffile.TiffFile(filename) as tffl: 
             if len(tffl.pages) == 1: 
                 raise ValueError("PMD does not accept single-page tiff datasets. Instead, pass your raw through the pipeline starting from the motion correction step.")
@@ -141,6 +157,7 @@ class tiff_loader():
         self._estimate_batch_size(frame_const=batch_size)
         self.pixel_batch_size=pixel_batch_size
         self.frame_corrector = frame_corrector_obj
+        self.num_samples = num_samples
         
         #Define the tiff loader
         self.tiff_dataobj = tiff_dataset(self.filename, self.batch_size, frame_corrector = self.frame_corrector)
@@ -213,7 +230,11 @@ class tiff_loader():
         '''
         display("Computing Video Statistics")
         if self.center and self.normalize:
-            results = self._calculate_mean_and_normalizer()
+            
+            if self.shape[2] > self.batch_size * self.num_samples:
+                results = self._calculate_mean_and_normalizer_sampling()
+            else:
+                results = self._calculate_mean_and_normalizer()
             self.mean_img = results[0]
             self.std_img = results[1]
         else:
@@ -233,7 +254,48 @@ class tiff_loader():
             overall_mean = overall_mean + mean_value
         display("Finished mean estimate")
         return np.array(overall_mean, dtype=self.dtype)
-  
+
+    
+    def _calculate_mean_and_normalizer_sampling(self):
+        '''
+        This function takes a full pass through the dataset and calculates the mean and noise variance at the 
+        same time, to avoid doing them separately
+        '''
+        display("Calculating mean and noise variance via sampling")
+        overall_mean = np.zeros((self.shape[0], self.shape[1]))
+        overall_normalizer = np.zeros((self.shape[0], self.shape[1]), dtype=self.dtype)
+        num_frames = self.shape[2]
+        
+        divisor = math.ceil(math.sqrt(self.shape[0]))
+        dim1_range_start_pts = np.arange(0, self.shape[0] - divisor, divisor)
+        dim1_range_start_pts = np.concatenate([dim1_range_start_pts, [self.shape[0] - divisor]], axis = 0)
+        dim2_range_start_pts = np.arange(0, self.shape[1] - divisor, divisor)
+        dim2_range_start_pts = np.concatenate([dim2_range_start_pts, [self.shape[1] - divisor]], axis = 0)
+        
+        elts_to_sample = np.arange(len(self.tiff_dataobj))
+        elts_used = np.random.choice(elts_to_sample, self.num_samples, replace=False)
+        frames_actually_used = 0
+        for i in elts_used:
+            data = self.tiff_dataobj[i]
+            data = np.array(jnp.concatenate(data, axis = 0))
+            frames_actually_used += data.shape[0]
+            mean_value_net = np.zeros((self.shape[0], self.shape[1]))
+            normalizer_net = np.zeros((self.shape[0], self.shape[1]))
+            for step1 in dim1_range_start_pts:
+                for step2 in dim2_range_start_pts:
+                    crop_data = data.squeeze()[:, step1:step1+divisor, step2:step2+divisor].transpose(1,2,0).astype("float32")
+                    mean_value, noise_est_2d = get_mean_and_noise(crop_data, num_frames)
+                    mean_value_net[step1:step1+divisor, step2:step2+divisor] = np.array(mean_value)
+                    normalizer_net[step1:step1+divisor, step2:step2+divisor] = np.array(noise_est_2d)
+                    
+            overall_mean += mean_value_net
+            overall_normalizer += normalizer_net
+        overall_mean = overall_mean * (num_frames / frames_actually_used)
+        overall_normalizer /= self.num_samples
+        overall_normalizer[overall_normalizer==0] = 1
+        display("Finished mean and noise variance")
+        return overall_mean.astype(self.dtype), overall_normalizer
+
     
     def _calculate_mean_and_normalizer(self):
         '''
@@ -298,58 +360,7 @@ class tiff_loader():
         projection_data = np.random.randn(crop_data.shape[-1], int(self.background_rank)).astype(self.dtype)
         spatial_basis, _ = truncated_random_svd(crop_data.reshape((-1, crop_data.shape[-1]), order=self.order), projection_data)        
         return spatial_basis.astype(self.dtype)
-
-    def V_projection_old(self, M):
-        '''
-        This function does two things, at a high level: 
-        (1) It projects the standardized data onto U (via multiplication by M)
-        (2) It calculates the temporal component from the full FOV SVD component as it does this
-        
-        Efficient batch matmul for sparse regression
-        Assumption: M has a small number of rows (and many columns). It is R x d, where R is the
-        rank of the decomposition and d is the number of pixels in the movie
-        Here we compute M(D - a_1a_2 - mean)/stdv. We break the computation into temporal subsets, so if the dataset is T frames, we compute this product T' frames at a time (where T' usually around 1 or 2K) 
-        R = Rank of PMD Decomposition
-        d = number of pixels in dataset
-        T = number of frames in dataset
-        T' = number of frames we load at a time in below for loop
-        p_r = rank of whole FOV SVD (self.spatial_basis.shape[1]). Typically very small, around 15
-        
-        
-        M: Projection matrix given as input: it is R x T'
-        D: The loaded dataset: dimensions d x T'
-        a1 = spatial basis (self.spatial_basis): dimensions d x p_r
-        a2 = temporal basis subset (calculation provided below): dimensions p_r x T'
-        mean = mean of data (from self.mean_image -- it is reshaped to d x 1 here
-        stdv = noise variance of data (from self.std_img -- it is reshaped to 1 x d here
-        
-        First: need to find a_2. To do so, compute: 
-        a1^T(D - mean)/stdv. Most efficient way: first find a1^TD, 
-        '''
-        
-        result = np.zeros((M.shape[0], self.shape[2]), dtype=self.dtype)
-        mean_img_r = self.mean_img.reshape((-1, 1), order=self.order)
-        std_img_r = self.std_img.reshape((1, -1), order=self.order)
-        start = 0
-        temporal_basis = np.zeros((self.spatial_basis.shape[1], self.shape[2]), dtype=self.dtype)
-
-        start = 0
-        for i, data in enumerate(tqdm(self.loader), 0):
-            # data = np.array(data).squeeze().transpose(1,2,0)
-            num_frames_chunk = data.shape[1]
-            # D = data.reshape((-1, data.shape[2]), order=self.order)
-            
-            temporal_basis_chunk, output = V_projection_routine(self.order, M, data, self.spatial_basis, mean_img_r, std_img_r)
-            
-            endpt = min(self.shape[2], start+num_frames_chunk)
-            result[:, start:endpt] = np.array(output).astype(self.dtype)
-            temporal_basis[:, start:endpt] = np.array(temporal_basis_chunk).astype(self.dtype)
-            start = endpt
-            
-
-        self.temporal_basis = temporal_basis
-        return result  
-    
+   
     def V_projection(self, M):
         '''
         This function does two things, at a high level: 
