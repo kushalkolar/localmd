@@ -266,7 +266,7 @@ class tiff_loader():
         overall_normalizer = np.zeros((self.shape[0], self.shape[1]), dtype=self.dtype)
         num_frames = self.shape[2]
         
-        divisor = math.ceil(math.sqrt(self.shape[0]))
+        divisor = math.ceil(math.sqrt(self.pixel_batch_size))
         dim1_range_start_pts = np.arange(0, self.shape[0] - divisor, divisor)
         dim1_range_start_pts = np.concatenate([dim1_range_start_pts, [self.shape[0] - divisor]], axis = 0)
         dim2_range_start_pts = np.arange(0, self.shape[1] - divisor, divisor)
@@ -277,13 +277,13 @@ class tiff_loader():
         frames_actually_used = 0
         for i in elts_used:
             data = self.tiff_dataobj[i]
-            data = np.array(jnp.concatenate(data, axis = 0))
+            data = np.array(jnp.concatenate(data, axis = 0)).squeeze()
             frames_actually_used += data.shape[0]
             mean_value_net = np.zeros((self.shape[0], self.shape[1]))
             normalizer_net = np.zeros((self.shape[0], self.shape[1]))
             for step1 in dim1_range_start_pts:
                 for step2 in dim2_range_start_pts:
-                    crop_data = data.squeeze()[:, step1:step1+divisor, step2:step2+divisor].transpose(1,2,0).astype("float32")
+                    crop_data = data[:, step1:step1+divisor, step2:step2+divisor].transpose(1,2,0).astype("float32")
                     mean_value, noise_est_2d = get_mean_and_noise(crop_data, num_frames)
                     mean_value_net[step1:step1+divisor, step2:step2+divisor] = np.array(mean_value)
                     normalizer_net[step1:step1+divisor, step2:step2+divisor] = np.array(noise_est_2d)
@@ -307,19 +307,19 @@ class tiff_loader():
         overall_normalizer = np.zeros((self.shape[0], self.shape[1]), dtype=self.dtype)
         num_frames = self.shape[2]
         
-        divisor = math.ceil(math.sqrt(self.shape[0]))
+        divisor = math.ceil(math.sqrt(self.pixel_batch_size))
         dim1_range_start_pts = np.arange(0, self.shape[0] - divisor, divisor)
         dim1_range_start_pts = np.concatenate([dim1_range_start_pts, [self.shape[0] - divisor]], axis = 0)
         dim2_range_start_pts = np.arange(0, self.shape[1] - divisor, divisor)
         dim2_range_start_pts = np.concatenate([dim2_range_start_pts, [self.shape[1] - divisor]], axis = 0)
         
         for i, data in enumerate(tqdm(self.loader), 0):
-            data = np.array(jnp.concatenate(data, axis = 0))
+            data = np.array(jnp.concatenate(data, axis = 0)).squeeze()
             mean_value_net = np.zeros((self.shape[0], self.shape[1]))
             normalizer_net = np.zeros((self.shape[0], self.shape[1]))
             for step1 in dim1_range_start_pts:
                 for step2 in dim2_range_start_pts:
-                    crop_data = data.squeeze()[:, step1:step1+divisor, step2:step2+divisor].transpose(1,2,0).astype("float32")
+                    crop_data = data[:, step1:step1+divisor, step2:step2+divisor].transpose(1,2,0).astype("float32")
                     mean_value, noise_est_2d = get_mean_and_noise(crop_data, num_frames)
                     mean_value_net[step1:step1+divisor, step2:step2+divisor] = np.array(mean_value)
                     normalizer_net[step1:step1+divisor, step2:step2+divisor] = np.array(noise_est_2d)
