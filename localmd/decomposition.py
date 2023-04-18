@@ -34,6 +34,7 @@ from jax import jit, vmap
 import functools
 from functools import partial
 import torch
+import torch_sparse
 import torch.multiprocessing as multiprocessing
 
 import scipy.sparse
@@ -341,41 +342,64 @@ def cast_decomposition_results(new_results, cast):
 
 def get_projector(U):
     #TODO: Use Pytorch_sparse to accelerate the matmul on GPU/TPU... (may be overkill)
+    '''
+    Input: 
+        U: matrix of dimensions (d, R) where d is number of pixels, R is number of frames
+    Returns: 
+    Tuple (final_matrix_r_sparse, projector)
+        final_matrix_r_sparse: a sparse version of U. Type scipy.sparse
+        projector: the inverse term used to do a linear subspace projection of a vector onto U. I.e.
+        
+        Proj_U (X) = U (U^TU)-1 U^T X --> projector is (U^TU)^-1
+    '''
     final_matrix_r_sparse = scipy.sparse.coo_matrix(U)
     prod = (final_matrix_r_sparse.T.dot(final_matrix_r_sparse)).toarray()
     theta = np.linalg.inv(prod)
-    projector = (final_matrix_r_sparse.dot(theta.T)).T #Do it like this to take advantage of sparsity using scipy not np
-    return projector
+    # projector = (final_matrix_r_sparse.dot(theta.T)).T #Do it like this to take advantage of sparsity using scipy not np
+    return (final_matrix_r_sparse, theta)
 
 
 
-def factored_svd(spatial_components, temporal_components):
-    """
+ 
+def factored_svd(spatial_components, temporal_components, device='cpu'):
+    '''
     Given a matrix factorization M=UQ (with U sparse) factorizes Q = RSVt so
     that [UR]SVt is the SVD of M.
-    TODO: Accelerate using jax or torch for GPU
-    """
-
-    # Step 1: Othogonalize Temporal Components LQ = V
-    Qt, Lt = np.linalg.qr(temporal_components.T)
-
+    
+    Inputs: 
+        spatial_components: scipy.sparse matrix
+        temporal_components: np.ndarray
+        
+    Note: float is significantly (i.e. 1 order of magnitude) faster here, that should be the default input
+    '''
+    spatial_components_sparse = torch_sparse.tensor.from_scipy(spatial_components).to(device)
+    temporal_components_torch = torch.from_numpy(temporal_components).to(device) 
+    
+    
+    Qt, Lt = torch.linalg.qr(temporal_components_torch.t(), mode='reduced')
     # Step 2: Fast Transformed Spatial Inner Product Sigma = L'U'UL
-    Sigma = np.asarray(spatial_components.T.dot(spatial_components).todense())
-    Sigma = np.dot(Lt, np.dot(Sigma, Lt.T))
-
-    # Step 3: Eigen Decomposition Of Sigma
-    eig_vals, eig_vecs = np.linalg.eigh(Sigma)  # Note: eig vals/vecs ascending
-    eig_vecs = eig_vecs[:, ::-1]  # Note: now vecs descending
-    singular_values = np.sqrt(eig_vals[::-1])  # Note: now vals descending
-
+    Sigma = torch_sparse.matmul(spatial_components_sparse.t(), spatial_components_sparse).to_dense()
+    Sigma = torch.matmul(Lt, torch.matmul(Sigma, Lt.t()))
+    
+    
+    eig_vals, eig_vecs = torch.linalg.eigh(Sigma)  # Note: eig vals/vecs ascending
+    eig_vecs = torch.flip(eig_vecs, dims=(1,))
+    eig_vals = torch.flip(eig_vals, dims=(0,))
+    singular_values = torch.sqrt(eig_vals)  # Note: now vals descending
+    
     # Step 4: Apply Eigen Vectors Such That (UR, V) Are Singular Vectors
-    mixing_weights = Lt.T.dot(eig_vecs) / singular_values[None, :]
-    temporal_basis = eig_vecs.T.dot(Qt.T)
+    mixing_weights = torch.matmul(Lt.t(), eig_vecs) / singular_values[None, :] 
+    temporal_basis = torch.matmul(eig_vecs.t(), Qt.t())
 
-    return mixing_weights, singular_values, temporal_basis  # R, s, Vt
-
+    return mixing_weights.cpu().numpy(), singular_values.cpu().numpy(), temporal_basis.cpu().numpy()
 
 def localmd_decomposition(filename, block_sizes, overlap, frame_range, max_components=50, background_rank=15, sim_conf=5, batching=10, tiff_batch_size = 10000, dtype='float32', order="F", num_workers=0, pixel_batch_size=5000, frame_corrector_obj = None):
+    
+    if torch.cuda.is_available():
+            device='cuda'
+    else:
+            device='cpu'
+            
     load_obj = tiff_loader(filename, dtype=dtype, center=True, normalize=True, background_rank=background_rank, batch_size=tiff_batch_size, order=order, num_workers=num_workers, pixel_batch_size=pixel_batch_size, frame_corrector_obj = frame_corrector_obj)
     start = frame_range[0]
     end = frame_range[1]
@@ -478,10 +502,13 @@ def localmd_decomposition(filename, block_sizes, overlap, frame_range, max_compo
     ## Step 2g: Aggregate the global SVD with the localMD results to create the final decomposition
     display("Aggregating Global SVD with localMD results")
     U_r, V = aggregate_decomposition(U_r, V, load_obj)
+    
+    U_r = U_r.astype(dtype)
+    V = V.astype(dtype)
 
     ## Step 2h: Do a SVD Reformat given U and V
     display("Running QR decomposition on V")
-    R, s, Vt = factored_svd(U_r, V)
+    R, s, Vt = factored_svd(U_r, V, device=device)
 
     display("Matrix decomposition completed")
 
