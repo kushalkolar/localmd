@@ -459,29 +459,26 @@ def localmd_decomposition(filename, block_sizes, overlap, frame_range, max_compo
         for j in dim_2_iters:
             pairs.append((k, j))
             subset = data[k:k+block_sizes[0], j:j+block_sizes[1], :].astype(dtype)
+
             projected_data = np.random.randn(subset.shape[2], max_components).astype(dtype)
             crop_mean_img = data_mean_img[k:k+block_sizes[0], j:j+block_sizes[1]]
             crop_std_img = data_std_img[k:k+block_sizes[0], j:j+block_sizes[1]]
             crop_spatial_basis = data_spatial_basis[k:k+block_sizes[0], j:j+block_sizes[1], :]
             spatial_comps, decisions, _ = filter_and_decompose(subset, crop_mean_img, crop_std_img, crop_spatial_basis, projected_data, spatial_thres, temporal_thres, 1)
-            # spatial_comps, decisions, _ = single_block_md(subset, projected_data, spatial_thres, temporal_thres, 1)
-            spatial_comps = spatial_comps.astype(dtype)
 
+            spatial_comps = np.array(spatial_comps).astype(dtype)
             dim_1_val = k
             dim_2_val = j
-
-            decisions = decisions.flatten()
-
-            spatial_cropped = spatial_comps[:, :, decisions > 0]
+            
+            decisions = np.array(decisions).flatten() > 0
+            spatial_cropped = spatial_comps[:, :, decisions]
             spatial_cropped = spatial_cropped * block_weights[:, :, None]
-            
             sparse_col_indices = sparse_indices[k:k+block_sizes[0], j:j+block_sizes[1]][:, :, None]
-            
             sparse_col_indices = sparse_col_indices + np.zeros((1, 1, spatial_cropped.shape[2]))
             sparse_row_indices = np.zeros_like(sparse_col_indices)
             addend = np.arange(row_number, row_number+spatial_cropped.shape[2])[None, None, :]
-            sparse_row_indices = sparse_row_indices + addend
             
+            sparse_row_indices = sparse_row_indices + addend
             sparse_col_indices_f = sparse_col_indices.flatten().tolist()
             sparse_row_indices_f = sparse_row_indices.flatten().tolist()
             spatial_values_f = spatial_cropped.flatten().tolist()
@@ -489,7 +486,6 @@ def localmd_decomposition(filename, block_sizes, overlap, frame_range, max_compo
             column_indices.extend(sparse_col_indices_f)
             row_indices.extend(sparse_row_indices_f)
             spatial_overall_values.extend(spatial_values_f)
-
             row_number += spatial_cropped.shape[2]
     
     U_r = scipy.sparse.coo_matrix((spatial_overall_values, (column_indices, row_indices)), shape=(data.shape[0]*data.shape[1], row_number))
