@@ -8,6 +8,8 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 from jax import jit, vmap
+import jax.dlpack
+import torch.utils.dlpack
 import functools
 from functools import partial
 import torch
@@ -110,6 +112,7 @@ class tiff_dataset():
     def __getitem__(self, index):
         start_time = time.time()
         start = index * self.batch_size
+        
         if index == max(0, self.chunks - 2):
             end = self.shape[2]
             #load rest of data here
@@ -392,22 +395,28 @@ class tiff_loader():
         U_mat_torch = torch_sparse.tensor.from_scipy(U_mat_normalized.transpose()).type(torch_dtype).to(device)
         temporal_basis = torch.zeros((self.spatial_basis.shape[1], self.shape[2]), dtype=torch_dtype)
         
-        import time
         start = 0
         for i, data in enumerate(tqdm(self.loader), 0):
             #Convert data to tensor 
             start_time = time.time()
-            D = np.concatenate(data, axis = 0)
-            D = np.squeeze(D)
-            D = np.transpose(D, (1,2,0))
-            D = np.reshape(D, (-1, D.shape[2]), order=self.order)
-            D_torch = torch.from_numpy(D).type(torch_dtype).to(device)
+            
+            D = data_reshape_jax(self.order, data) 
+            D_torch = jax2torch(D, device)
+            D_torch_time = time.time() - start_time
+            
+            start_time = time.time()
             temporal_basis_chunk,output = V_projection_routine(U_mat_torch, D_torch, spatial_basis_torch, mean_img_r, std_img_r)
+            routine_time = time.time() - start_time
+            
+            start_time = time.time()
             num_frames_chunk = output.shape[1]
             endpt = min(self.shape[2], start+num_frames_chunk)
             temporal_basis[:, start:endpt] = temporal_basis_chunk
             result[:, start:endpt] = output
             start = endpt
+            write_time = time.time() - start_time
+            
+            display("D_time {} routine_time {} writing_time {}".format(D_torch_time, routine_time, write_time))
             
             
         projected_V = Inv_mat.dot(result.detach().cpu().numpy())
@@ -529,9 +538,22 @@ def V_projection_routine_jax(order, M, D, spatial_basis, mean_img_r, std_img_r):
 
     return temporal_basis_chunk, output
 
+
+@partial(jit, static_argnums=(0))
+def data_reshape_jax(order, D):
+    D = jnp.concatenate(D, axis =0)
+    D = jnp.squeeze(D)
+    D = jnp.transpose(D, (1,2,0))
+    D = jnp.reshape(D, (-1, D.shape[2]), order=order)
+    return D
+    
+
   
 @partial(jit)
 def filter_components(data, spatial_r, temporal_basis):
     subt = jnp.tensordot(spatial_r, temporal_basis, axes=(2, 0))
     return data - subt
-    
+  
+                
+def jax2torch(x, device):
+    return torch.utils.dlpack.from_dlpack(jax.dlpack.to_dlpack(x)).to(device)
