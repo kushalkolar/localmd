@@ -127,7 +127,7 @@ class tiff_dataset():
         if self.frame_corrector is not None:
             data = self.frame_corrector.register_frames(data.astype("float32"))
         else:
-            data = [data]
+            data = data
         return data
     
 
@@ -213,15 +213,25 @@ class tiff_loader():
     def temporal_crop(self, frames):
         '''
         Input: 
-            frame_range: tuple (a, b). 'a' is the python index of the first frame and 'b-1' is the python index
-            of the last frame
+            frames: a list of frame values (for e.g. [1,5,2,7,8]) 
         Returns: 
-            Array containing this data
+            A (potentially motion-corrected) array containing these frames from the tiff dataset 
         '''
+        
         if self.frame_corrector is not None:
-            x = tifffile.imread(self.filename, key=frames).astype("float32")
-            reg = np.concatenate(self.frame_corrector.register_frames(x), axis = 0)
-            return reg.transpose(1,2,0)
+            frame_length = len(frames) 
+            result = np.zeros((self.shape[0], self.shape[1], frame_length))
+            
+            value_points = list(range(0, frame_length, self.batch_size))
+            if value_points[-1] > frame_length - self.batch_size and frame_length > self.batch_size:
+                value_points[-1] = frame_length - self.batch_size
+            for k in value_points:
+                start_point = k
+                end_point = min(k + self.batch_size, frame_length)
+                curr_frames = frames[start_point:end_point]
+                x = tifffile.imread(self.filename, key=curr_frames).astype("float32")
+                result[:, :, start_point:end_point] = np.array(self.frame_corrector.register_frames(x)).transpose(1,2,0)
+            return result
         else:
             return tifffile.imread(self.filename, key=frames).transpose(1,2,0).astype(self.dtype)
 
@@ -265,6 +275,7 @@ class tiff_loader():
         This function takes a full pass through the dataset and calculates the mean and noise variance at the 
         same time, to avoid doing them separately
         '''
+        frame_constant = 1024
         display("Calculating mean and noise variance via sampling")
         overall_mean = np.zeros((self.shape[0], self.shape[1]))
         overall_normalizer = np.zeros((self.shape[0], self.shape[1]), dtype=self.dtype)
@@ -276,18 +287,23 @@ class tiff_loader():
         dim2_range_start_pts = np.arange(0, self.shape[1] - divisor, divisor)
         dim2_range_start_pts = np.concatenate([dim2_range_start_pts, [self.shape[1] - divisor]], axis = 0)
         
-        elts_to_sample = np.arange(len(self.tiff_dataobj))
+        elts_to_sample = list(range(0, self.shape[2], frame_constant))
+        if elts_to_sample[-1] > self.shape[2] - frame_constant and elts_to_sample[-1] > 0:
+            elts_to_sample[-1] = self.shape[2] - frame_constant
+        elts_used = np.random.choice(elts_to_sample, min(self.num_samples, len(elts_to_sample)), replace=False)
         elts_used = np.random.choice(elts_to_sample, self.num_samples, replace=False)
         frames_actually_used = 0
         for i in elts_used:
-            data = self.tiff_dataobj[i]
-            data = np.array(jnp.concatenate(data, axis = 0)).squeeze()
-            frames_actually_used += data.shape[0]
+            start_pt_frame = i
+            end_pt_frame = min(i + frame_constant, self.shape[2])
+            frames_actually_used += end_pt_frame - start_pt_frame
+            
+            data = np.array(self.temporal_crop([i for i in range(start_pt_frame, end_pt_frame)]))
             mean_value_net = np.zeros((self.shape[0], self.shape[1]))
             normalizer_net = np.zeros((self.shape[0], self.shape[1]))
             for step1 in dim1_range_start_pts:
                 for step2 in dim2_range_start_pts:
-                    crop_data = data[:, step1:step1+divisor, step2:step2+divisor].transpose(1,2,0).astype("float32")
+                    crop_data = data[step1:step1+divisor, step2:step2+divisor, :]
                     mean_value, noise_est_2d = get_mean_and_noise(crop_data, num_frames)
                     mean_value_net[step1:step1+divisor, step2:step2+divisor] = np.array(mean_value)
                     normalizer_net[step1:step1+divisor, step2:step2+divisor] = np.array(noise_est_2d)
@@ -295,7 +311,7 @@ class tiff_loader():
             overall_mean += mean_value_net
             overall_normalizer += normalizer_net
         overall_mean = overall_mean * (num_frames / frames_actually_used)
-        overall_normalizer /= self.num_samples
+        overall_normalizer /= len(elts_to_sample)
         overall_normalizer[overall_normalizer==0] = 1
         display("Finished mean and noise variance")
         return overall_mean.astype(self.dtype), overall_normalizer
@@ -306,6 +322,7 @@ class tiff_loader():
         This function takes a full pass through the dataset and calculates the mean and noise variance at the 
         same time, to avoid doing them separately
         '''
+        frame_constant = 1024
         display("Calculating mean and noise variance")
         overall_mean = np.zeros((self.shape[0], self.shape[1]))
         overall_normalizer = np.zeros((self.shape[0], self.shape[1]), dtype=self.dtype)
@@ -317,20 +334,29 @@ class tiff_loader():
         dim2_range_start_pts = np.arange(0, self.shape[1] - divisor, divisor)
         dim2_range_start_pts = np.concatenate([dim2_range_start_pts, [self.shape[1] - divisor]], axis = 0)
         
-        for i, data in enumerate(tqdm(self.loader), 0):
-            data = np.array(jnp.concatenate(data, axis = 0)).squeeze()
+        elts_used = list(range(0, self.shape[2], frame_constant))
+        if elts_used[-1] > self.shape[2] - frame_constant and elts_used[-1] > 0:
+            elts_used[-1] = self.shape[2] - frame_constant
+        
+
+        for i in elts_used:
+            start_pt_frame = i
+            end_pt_frame = min(i + frame_constant, self.shape[2])
+            data = np.array(self.temporal_crop([i for i in range(start_pt_frame, end_pt_frame)]))
+
+            data = np.array(data) 
             mean_value_net = np.zeros((self.shape[0], self.shape[1]))
             normalizer_net = np.zeros((self.shape[0], self.shape[1]))
             for step1 in dim1_range_start_pts:
                 for step2 in dim2_range_start_pts:
-                    crop_data = data[:, step1:step1+divisor, step2:step2+divisor].transpose(1,2,0).astype("float32")
+                    crop_data = data[step1:step1+divisor, step2:step2+divisor, :]
                     mean_value, noise_est_2d = get_mean_and_noise(crop_data, num_frames)
                     mean_value_net[step1:step1+divisor, step2:step2+divisor] = np.array(mean_value)
                     normalizer_net[step1:step1+divisor, step2:step2+divisor] = np.array(noise_est_2d)
                     
             overall_mean += mean_value_net
             overall_normalizer += normalizer_net
-        overall_normalizer /= len(self.tiff_dataobj)
+        overall_normalizer /= len(elts_used)
         overall_normalizer[overall_normalizer==0] = 1
         display("Finished mean and noise variance")
         return overall_mean.astype(self.dtype), overall_normalizer
@@ -366,7 +392,7 @@ class tiff_loader():
         return spatial_basis.astype(self.dtype)
    
 
-    def V_projection(self, M):
+    def V_projection_torch(self, M):
         '''
         M is a tuple, consisting of two elements
             Element 0: A scipy.sparse.coo_matrix of dimensions (d, R)
@@ -425,7 +451,7 @@ class tiff_loader():
 
             
 
-    def V_projection_jax(self, M):
+    def V_projection(self, M):
         '''
         This function does two things, at a high level: 
         (1) It projects the standardized data onto U (via multiplication by M)
@@ -452,7 +478,7 @@ class tiff_loader():
         First: need to find a_2. To do so, compute: 
         a1^T(D - mean)/stdv. Most efficient way: first find a1^TD, 
         '''
-        
+        display("RUNNING JAX")
         result = np.zeros((M.shape[0], self.shape[2]), dtype=self.dtype)
         mean_img_r = self.mean_img.reshape((-1, 1), order=self.order)
         std_img_r = self.std_img.reshape((1, -1), order=self.order)
@@ -462,7 +488,7 @@ class tiff_loader():
         start = 0
         for i, data in enumerate(tqdm(self.loader), 0):
 
-            temporal_basis_chunk, output = V_projection_routine(self.order, M, data, self.spatial_basis, mean_img_r, std_img_r)
+            temporal_basis_chunk, output = V_projection_routine_jax(self.order, M, data, self.spatial_basis, mean_img_r, std_img_r)
             num_frames_chunk = output.shape[1]
             
             endpt = min(self.shape[2], start+num_frames_chunk)
@@ -522,12 +548,10 @@ def V_projection_routine(M_std, D, spatial_basis, mean_img_r, std_img_r):
 
 @partial(jit, static_argnums=(0))
 def V_projection_routine_jax(order, M, D, spatial_basis, mean_img_r, std_img_r):
-    D = jnp.concatenate(D, axis =0)
-    D = jnp.squeeze(D)
     D = jnp.transpose(D, (1,2,0))
     D = jnp.reshape(D, (-1, D.shape[2]), order=order)
     M = M/std_img_r
-    temporal_basis_chunk = get_temporal_basis(D, spatial_basis, mean_img_r, std_img_r)
+    temporal_basis_chunk = get_temporal_basis_jax(D, spatial_basis, mean_img_r, std_img_r)
     MD = jnp.matmul(M, D)
     Ma1 = jnp.matmul(M, spatial_basis)
     Ma1a2 = jnp.matmul(Ma1, temporal_basis_chunk)
@@ -541,8 +565,6 @@ def V_projection_routine_jax(order, M, D, spatial_basis, mean_img_r, std_img_r):
 
 @partial(jit, static_argnums=(0))
 def data_reshape_jax(order, D):
-    D = jnp.concatenate(D, axis =0)
-    D = jnp.squeeze(D)
     D = jnp.transpose(D, (1,2,0))
     D = jnp.reshape(D, (-1, D.shape[2]), order=order)
     return D
