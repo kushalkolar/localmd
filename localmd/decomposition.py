@@ -354,9 +354,10 @@ def get_projector(U):
     '''
     final_matrix_r_sparse = scipy.sparse.coo_matrix(U)
     prod = (final_matrix_r_sparse.T.dot(final_matrix_r_sparse)).toarray()
-    theta = np.linalg.inv(prod)
+    theta = np.array(jnp.linalg.inv(prod))
     # projector = (final_matrix_r_sparse.dot(theta.T)).T #Do it like this to take advantage of sparsity using scipy not np
-    return (final_matrix_r_sparse, theta)
+    # return projector
+    return (final_matrix_r_sparse.T, theta)
 
 
 
@@ -414,7 +415,7 @@ def localmd_decomposition(filename, block_sizes, overlap, frame_range, max_compo
     
     ##Step 2b: Load the data you will do blockwise SVD on
     display("Loading Data")
-    data = load_obj.temporal_crop(frames)
+    data = load_obj.temporal_crop([i for i in range(start, end)])
     data_std_img = load_obj.std_img #(d1, d2) shape
     data_mean_img = load_obj.mean_img #(d1, d2) shape
     data_spatial_basis = load_obj.spatial_basis.reshape((load_obj.shape[0], load_obj.shape[1], -1), order=load_obj.order)

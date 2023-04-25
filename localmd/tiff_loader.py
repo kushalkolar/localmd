@@ -4,10 +4,15 @@ import sys
 import math
 import tifffile
 
+##CAUTION: Experimental Imports..
+from jax.experimental import sparse
+from jax.experimental.sparse import BCOO
+
 import numpy as np
 import jax
 import jax.numpy as jnp
 from jax import jit, vmap
+
 import jax.dlpack
 import torch.utils.dlpack
 import functools
@@ -165,6 +170,7 @@ class tiff_loader():
         
         #Define the tiff loader
         self.tiff_dataobj = tiff_dataset(self.filename, self.batch_size, frame_corrector = self.frame_corrector)
+        self.tiff_dataobj_vanilla = tiff_dataset(self.filename, self.batch_size, frame_corrector = None)
         if num_workers is None:
             num_cpu = multiprocessing.cpu_count()
             num_workers = min(num_cpu - 1, len(self.tiff_dataobj))
@@ -172,6 +178,8 @@ class tiff_loader():
 
         
         self.loader = torch.utils.data.DataLoader(self.tiff_dataobj, batch_size=1,
+                                             shuffle=False, num_workers=num_workers, collate_fn=regular_collate, timeout=0)
+        self.loader_vanilla = torch.utils.data.DataLoader(self.tiff_dataobj_vanilla, batch_size=1,
                                              shuffle=False, num_workers=num_workers, collate_fn=regular_collate, timeout=0)
         
         self.center = center
@@ -215,7 +223,8 @@ class tiff_loader():
         Input: 
             frames: a list of frame values (for e.g. [1,5,2,7,8]) 
         Returns: 
-            A (potentially motion-corrected) array containing these frames from the tiff dataset 
+            A (potentially motion-corrected) array containing these frames from the tiff dataset with shape (d1, d2, T) where d1, d2 are FOV dimensions, T is 
+            number of frames selected
         '''
         
         if self.frame_corrector is not None:
@@ -291,7 +300,6 @@ class tiff_loader():
         if elts_to_sample[-1] > self.shape[2] - frame_constant and elts_to_sample[-1] > 0:
             elts_to_sample[-1] = self.shape[2] - frame_constant
         elts_used = np.random.choice(elts_to_sample, min(self.num_samples, len(elts_to_sample)), replace=False)
-        elts_used = np.random.choice(elts_to_sample, self.num_samples, replace=False)
         frames_actually_used = 0
         for i in elts_used:
             start_pt_frame = i
@@ -478,17 +486,27 @@ class tiff_loader():
         First: need to find a_2. To do so, compute: 
         a1^T(D - mean)/stdv. Most efficient way: first find a1^TD, 
         '''
-        display("RUNNING JAX")
-        result = np.zeros((M.shape[0], self.shape[2]), dtype=self.dtype)
+        sparse_projection_term = BCOO.from_scipy_sparse(M[0])
+        inv_term = M[1]
+        
+        result = np.zeros((inv_term.shape[0], self.shape[2]), dtype=self.dtype)
         mean_img_r = self.mean_img.reshape((-1, 1), order=self.order)
         std_img_r = self.std_img.reshape((1, -1), order=self.order)
         start = 0
         temporal_basis = np.zeros((self.spatial_basis.shape[1], self.shape[2]), dtype=self.dtype)
+        
+        def full_V_projection_routine_jax(order, register_func, inv_term, sparse_project_term, data, spatial_basis, mean_img_r, std_img_r):
+            new_data = register_func(data)
+            return V_projection_routine_jax(self.order, inv_term, sparse_project_term, new_data, self.spatial_basis, mean_img_r, std_img_r)
+        
+        full_V_projection_routine = jit(full_V_projection_routine_jax, static_argnums=(0, 1))
 
         start = 0
-        for i, data in enumerate(tqdm(self.loader), 0):
+        
+        
+        for i, data in enumerate(tqdm(self.loader_vanilla), 0):
 
-            temporal_basis_chunk, output = V_projection_routine_jax(self.order, M, data, self.spatial_basis, mean_img_r, std_img_r)
+            temporal_basis_chunk, output = full_V_projection_routine(self.order, self.frame_corrector.register_frames, inv_term,sparse_projection_term, data, self.spatial_basis, mean_img_r, std_img_r)
             num_frames_chunk = output.shape[1]
             
             endpt = min(self.shape[2], start+num_frames_chunk)
@@ -547,9 +565,14 @@ def V_projection_routine(M_std, D, spatial_basis, mean_img_r, std_img_r):
     return temporal_basis_chunk, output
 
 @partial(jit, static_argnums=(0))
-def V_projection_routine_jax(order, M, D, spatial_basis, mean_img_r, std_img_r):
+def V_projection_routine_jax(order, inv_term, M, D, spatial_basis, mean_img_r, std_img_r):
     D = jnp.transpose(D, (1,2,0))
     D = jnp.reshape(D, (-1, D.shape[2]), order=order)
+    return V_projection_inner_loop(inv_term, M, D, spatial_basis, mean_img_r, std_img_r)
+
+@sparse.sparsify
+def V_projection_inner_loop(inv_term, M, D, spatial_basis, mean_img_r, std_img_r):
+    
     M = M/std_img_r
     temporal_basis_chunk = get_temporal_basis_jax(D, spatial_basis, mean_img_r, std_img_r)
     MD = jnp.matmul(M, D)
@@ -559,8 +582,10 @@ def V_projection_routine_jax(order, M, D, spatial_basis, mean_img_r, std_img_r):
 
     output = MD - Ma1a2 - M_mean
 
+    output = jnp.dot(inv_term, output)
 
     return temporal_basis_chunk, output
+
 
 
 @partial(jit, static_argnums=(0))
