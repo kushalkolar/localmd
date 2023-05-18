@@ -362,10 +362,13 @@ def get_projector(U):
 
 
  
-def factored_svd(spatial_components, temporal_components, device='cpu'):
+def factored_svd(spatial_components, temporal_components, device='cpu', explained_variance_threshold = 0.995):
     '''
     Given a matrix factorization M=UQ (with U sparse) factorizes Q = RSVt so
     that [UR]SVt is the SVD of M.
+    
+    KEY: The product, spatial_components * temporal_components, should be a matrix whose rows have mean 0. 
+    This is important because when we produce the factorized SVD, we can then do another round of PCA-like dimensionality reduction (the singular values of this SVD directly gives us the eigenvalues of the correlation matrix)
     
     Inputs: 
         spatial_components: scipy.sparse matrix
@@ -376,12 +379,11 @@ def factored_svd(spatial_components, temporal_components, device='cpu'):
     spatial_components_sparse = torch_sparse.tensor.from_scipy(spatial_components).to(device)
     temporal_components_torch = torch.from_numpy(temporal_components).to(device) 
     
-    
     Qt, Lt = torch.linalg.qr(temporal_components_torch.t(), mode='reduced')
     # Step 2: Fast Transformed Spatial Inner Product Sigma = L'U'UL
     Sigma = torch_sparse.matmul(spatial_components_sparse.t(), spatial_components_sparse).to_dense()
     Sigma = torch.matmul(Lt, torch.matmul(Sigma, Lt.t()))
-    
+    Sigma = (Sigma + Sigma.t()) / 2 #Trick to enforce symmetry of the matrix (so that next step works as intended, independent of rounding errors from above) 
     
     eig_vals, eig_vecs = torch.linalg.eigh(Sigma)  # Note: eig vals/vecs ascending
     eig_vecs = torch.flip(eig_vecs, dims=(1,))
@@ -389,10 +391,44 @@ def factored_svd(spatial_components, temporal_components, device='cpu'):
     singular_values = torch.sqrt(eig_vals)  # Note: now vals descending
     
     # Step 4: Apply Eigen Vectors Such That (UR, V) Are Singular Vectors
-    mixing_weights = torch.matmul(Lt.t(), eig_vecs) / singular_values[None, :] 
+    mixing_weights = torch.matmul(Lt.t(), eig_vecs) / singular_values[None, :]
     temporal_basis = torch.matmul(eig_vecs.t(), Qt.t())
+    
+    #Here we prune the factorized SVD 
+    return rank_prune_svd(mixing_weights, singular_values, temporal_basis, explained_variance_threshold)
 
-    return mixing_weights.cpu().numpy(), singular_values.cpu().numpy(), temporal_basis.cpu().numpy()
+def rank_prune_svd(mixing_weights, singular_values, temporal_basis, explained_variance_threshold = 0.995):
+    '''
+    Inputs: 
+        mixing_weights: torch.Tensor, shape (R x R)
+        singular_values: torch.Tensor, shape (R)
+        temporal_basis: torch.Tensor, shape (R, T)
+        explained_variance: float between 0 and 1. The fraction of explained variance which we would like to explain. 
+    '''
+    device = mixing_weights.device
+    mixing_weights = mixing_weights
+    singular_values = singular_values
+    temporal_basis = temporal_basis
+    
+    squared_singular_values = singular_values * singular_values
+    total_featurewise_variance = torch.sum(squared_singular_values)
+    if total_featurewise_variance > 0:
+        squared_singular_values /= total_featurewise_variance
+    squared_singular_values_cumulative = torch.cumsum(squared_singular_values, dim=0)
+    above_threshold = squared_singular_values_cumulative > explained_variance_threshold
+    critical_index = torch.min(torch.nonzero(above_threshold))
+    
+    
+    if torch.index_select(squared_singular_values_cumulative, 0, critical_index) <= explained_variance_threshold:
+        pass
+    else:
+        print("Rank Pruning has been applied. The rank was {}, now it is {}. We have pruned {} of the components".format(mixing_weights.shape[1], critical_index, 1 - critical_index / mixing_weights.shape[1]))
+        keep_indices = torch.arange(critical_index, device=device)
+        mixing_weights = torch.index_select(mixing_weights, 1, keep_indices) 
+        singular_values = torch.index_select(singular_values, 0, keep_indices)
+        temporal_basis = torch.index_select(temporal_basis, 0, keep_indices)
+        
+    return mixing_weights, singular_values, temporal_basis
 
 def localmd_decomposition(filename, block_sizes, overlap, frame_range, max_components=50, background_rank=15, sim_conf=5, batching=10, tiff_batch_size = 10000, dtype='float32', order="F", num_workers=0, pixel_batch_size=5000, frame_corrector_obj = None):
     
@@ -509,12 +545,13 @@ def localmd_decomposition(filename, block_sizes, overlap, frame_range, max_compo
 
     display("Matrix decomposition completed")
 
-    return U_r, R, s, Vt, load_obj
+    return U_r, R.cpu().numpy(), s.cpu().numpy(), Vt.cpu().numpy(), load_obj
 
 
 def aggregate_decomposition(U_r, V, load_obj):
+    
     if load_obj.background_rank == 0:
-        return U_r, V
+        pass
     else:
         spatial_bg = load_obj.spatial_basis
         temporal_bg = load_obj.temporal_basis
@@ -522,4 +559,4 @@ def aggregate_decomposition(U_r, V, load_obj):
         U_r = scipy.sparse.hstack([U_r, spatial_bg_sparse])
         V = np.concatenate([V, temporal_bg], axis = 0)
     
-        return U_r, V
+    return U_r, V
