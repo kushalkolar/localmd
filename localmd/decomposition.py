@@ -370,14 +370,16 @@ def factored_svd(spatial_components, temporal_components, device='cpu', explaine
     KEY: The product, spatial_components * temporal_components, should be a matrix whose rows have mean 0. 
     This is important because when we produce the factorized SVD, we can then do another round of PCA-like dimensionality reduction (the singular values of this SVD directly gives us the eigenvalues of the correlation matrix)
     
+    KEY: Everything needs to be float64 for numerical stability 
+    
     Inputs: 
         spatial_components: scipy.sparse matrix
         temporal_components: np.ndarray
         
     Note: float is significantly (i.e. 1 order of magnitude) faster here, that should be the default input
     '''
-    spatial_components_sparse = torch_sparse.tensor.from_scipy(spatial_components).to(device)
-    temporal_components_torch = torch.from_numpy(temporal_components).to(device) 
+    spatial_components_sparse = torch_sparse.tensor.from_scipy(spatial_components).to(device).double()
+    temporal_components_torch = torch.from_numpy(temporal_components).to(device).double()
     
     Qt, Lt = torch.linalg.qr(temporal_components_torch.t(), mode='reduced')
     # Step 2: Fast Transformed Spatial Inner Product Sigma = L'U'UL
@@ -388,6 +390,13 @@ def factored_svd(spatial_components, temporal_components, device='cpu', explaine
     eig_vals, eig_vecs = torch.linalg.eigh(Sigma)  # Note: eig vals/vecs ascending
     eig_vecs = torch.flip(eig_vecs, dims=(1,))
     eig_vals = torch.flip(eig_vals, dims=(0,))
+    
+    eig_vec_norms = torch.linalg.norm(eig_vecs, dim=0)
+    selected_indices = torch.nonzero((eig_vec_norms > 0) * (eig_vals > 0)).squeeze()
+    
+    eig_vecs = torch.index_select(eig_vecs, 1, selected_indices)
+    eig_vals = torch.index_select(eig_vals, 0, selected_indices) 
+    
     singular_values = torch.sqrt(eig_vals)  # Note: now vals descending
     
     # Step 4: Apply Eigen Vectors Such That (UR, V) Are Singular Vectors
@@ -410,27 +419,35 @@ def rank_prune_svd(mixing_weights, singular_values, temporal_basis, explained_va
     singular_values = singular_values
     temporal_basis = temporal_basis
     
-    squared_singular_values = singular_values * singular_values
+    singular_values_normalized = singular_values / torch.amax(singular_values) #We assume no divide by zero here
+    squared_singular_values = singular_values_normalized * singular_values_normalized
     total_featurewise_variance = torch.sum(squared_singular_values)
     if total_featurewise_variance > 0:
         squared_singular_values /= total_featurewise_variance
     squared_singular_values_cumulative = torch.cumsum(squared_singular_values, dim=0)
     above_threshold = squared_singular_values_cumulative > explained_variance_threshold
-    critical_index = torch.min(torch.nonzero(above_threshold))
+    
+    nonzero_above_threshold = torch.nonzero(above_threshold)
+    if nonzero_above_threshold.numel() == 0:
+        display("This threshold was too high")
+        return mixing_weights, singular_values, temporal_basis
+    ## Add a check here to verify that torch nonzero is actually good
+    critical_index = torch.min(nonzero_above_threshold)
     
     
     if torch.index_select(squared_singular_values_cumulative, 0, critical_index) <= explained_variance_threshold:
-        pass
+        display("Warning: for unknown reasons the index did not meet threshold, potential bug") 
+        return mixing_weights, singular_values, temporal_basis
     else:
-        print("Rank Pruning has been applied. The rank was {}, now it is {}. We have pruned {} of the components".format(mixing_weights.shape[1], critical_index, 1 - critical_index / mixing_weights.shape[1]))
-        keep_indices = torch.arange(critical_index, device=device)
+        display("Rank Pruning has been applied. The rank was {}, now it is {}. We have pruned {:.2f} of the components".format(mixing_weights.shape[1], critical_index+1, 1 - (critical_index+1) / mixing_weights.shape[1]))
+        keep_indices = torch.arange(critical_index + 1, device=device)
         mixing_weights = torch.index_select(mixing_weights, 1, keep_indices) 
         singular_values = torch.index_select(singular_values, 0, keep_indices)
         temporal_basis = torch.index_select(temporal_basis, 0, keep_indices)
         
     return mixing_weights, singular_values, temporal_basis
 
-def localmd_decomposition(filename, block_sizes, overlap, frame_range, max_components=50, background_rank=15, sim_conf=5, batching=10, tiff_batch_size = 10000, dtype='float32', order="F", num_workers=0, pixel_batch_size=5000, frame_corrector_obj = None):
+def localmd_decomposition(filename, block_sizes, overlap, frame_range, max_components=50, background_rank=15, sim_conf=5, batching=10, tiff_batch_size = 10000, dtype='float32', order="F", num_workers=0, pixel_batch_size=5000, frame_corrector_obj = None, max_consec_failures = 1, explained_variance_threshold=0.995):
     
     if torch.cuda.is_available():
             device='cuda'
@@ -501,7 +518,7 @@ def localmd_decomposition(filename, block_sizes, overlap, frame_range, max_compo
             crop_mean_img = data_mean_img[k:k+block_sizes[0], j:j+block_sizes[1]]
             crop_std_img = data_std_img[k:k+block_sizes[0], j:j+block_sizes[1]]
             crop_spatial_basis = data_spatial_basis[k:k+block_sizes[0], j:j+block_sizes[1], :]
-            spatial_comps, decisions, _ = filter_and_decompose(subset, crop_mean_img, crop_std_img, crop_spatial_basis, projected_data, spatial_thres, temporal_thres, 1)
+            spatial_comps, decisions, _ = filter_and_decompose(subset, crop_mean_img, crop_std_img, crop_spatial_basis, projected_data, spatial_thres, temporal_thres, max_consec_failures)
 
             spatial_comps = np.array(spatial_comps).astype(dtype)
             dim_1_val = k
@@ -524,8 +541,11 @@ def localmd_decomposition(filename, block_sizes, overlap, frame_range, max_compo
             row_indices.extend(sparse_row_indices_f)
             spatial_overall_values.extend(spatial_values_f)
             row_number += spatial_cropped.shape[2]
+            
     
     U_r = scipy.sparse.coo_matrix((spatial_overall_values, (column_indices, row_indices)), shape=(data.shape[0]*data.shape[1], row_number))
+    
+    display("Computing projector for sparse regression step")
     projector = get_projector(U_r)
 
     ## Step 2f: Do sparse regression to get the V matrix: 
@@ -541,7 +561,7 @@ def localmd_decomposition(filename, block_sizes, overlap, frame_range, max_compo
 
     ## Step 2h: Do a SVD Reformat given U and V
     display("Running QR decomposition on V")
-    R, s, Vt = factored_svd(U_r, V, device=device)
+    R, s, Vt = factored_svd(U_r, V, device='cpu', explained_variance_threshold=explained_variance_threshold)
 
     display("Matrix decomposition completed")
 
