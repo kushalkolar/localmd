@@ -495,18 +495,26 @@ class tiff_loader():
         start = 0
         temporal_basis = np.zeros((self.spatial_basis.shape[1], self.shape[2]), dtype=self.dtype)
         
+        if self.frame_corrector is not None:
+            registration_method = self.frame_corrector.register_frames
+        else:
+            def return_identity(frames):
+                return frames
+            registration_method = return_identity
         def full_V_projection_routine_jax(order, register_func, inv_term, sparse_project_term, data, spatial_basis, mean_img_r, std_img_r):
             new_data = register_func(data)
             return V_projection_routine_jax(self.order, inv_term, sparse_project_term, new_data, self.spatial_basis, mean_img_r, std_img_r)
-        
+
         full_V_projection_routine = jit(full_V_projection_routine_jax, static_argnums=(0, 1))
 
         start = 0
         
         
+        
+        
         for i, data in enumerate(tqdm(self.loader_vanilla), 0):
 
-            temporal_basis_chunk, output = full_V_projection_routine(self.order, self.frame_corrector.register_frames, inv_term,sparse_projection_term, data, self.spatial_basis, mean_img_r, std_img_r)
+            temporal_basis_chunk, output = full_V_projection_routine(self.order, registration_method, inv_term,sparse_projection_term, data, self.spatial_basis, mean_img_r, std_img_r)
             num_frames_chunk = output.shape[1]
             
             endpt = min(self.shape[2], start+num_frames_chunk)
