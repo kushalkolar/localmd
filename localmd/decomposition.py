@@ -288,12 +288,12 @@ def filter_and_decompose(block,mean_img, std_img,spatial_basis, projection_data,
     block /= std_img[:, :, None]
     
     #Step 2: Get the temporal basis for the full FOV decomposition: 
-    temporal_basis = jnp.tensordot(jnp.transpose(spatial_basis, axes=(2,0,1)), block, axes=((1,2), (0,1)))
-    block = block - jnp.tensordot(spatial_basis, temporal_basis, axes=((2), (0)))
+    # temporal_basis = jnp.tensordot(jnp.transpose(spatial_basis, axes=(2,0,1)), block, axes=((1,2), (0,1)))
+    # block = block - jnp.tensordot(spatial_basis, temporal_basis, axes=((2), (0)))
     
     return single_block_md(block, projection_data, spatial_thres, temporal_thres, max_consec_failures)
     
-# @partial(jit)
+@partial(jit)
 def single_block_md(block, projection_data, spatial_thres, temporal_thres, max_consec_failures):
     '''
     Matrix Decomposition function for all blocks. 
@@ -312,7 +312,6 @@ def single_block_md(block, projection_data, spatial_thres, temporal_thres, max_c
     decomposition = truncated_random_svd(block_2d, projection_data)
     u_mat, v_mat = decomposition[0], decomposition[1]
     u_mat = jnp.reshape(u_mat, (d1, d2, u_mat.shape[1]), order="F")
-    
 
     
 #     ##Now we begin the evaluation phase
@@ -380,7 +379,6 @@ def factored_svd(spatial_components, temporal_components, device='cpu', explaine
     '''
     spatial_components_sparse = torch_sparse.tensor.from_scipy(spatial_components).to(device).double()
     temporal_components_torch = torch.from_numpy(temporal_components).to(device).double()
-    
     Qt, Lt = torch.linalg.qr(temporal_components_torch.t(), mode='reduced')
     # Step 2: Fast Transformed Spatial Inner Product Sigma = L'U'UL
     Sigma = torch_sparse.matmul(spatial_components_sparse.t(), spatial_components_sparse).to_dense()
@@ -468,7 +466,7 @@ def localmd_decomposition(filename, block_sizes, overlap, frame_range, max_compo
     
     ##Step 2b: Load the data you will do blockwise SVD on
     display("Loading Data")
-    data = load_obj.temporal_crop([i for i in range(start, end)])
+    data = load_obj.temporal_crop_with_filter([i for i in range(start, end)])
     data_std_img = load_obj.std_img #(d1, d2) shape
     data_mean_img = load_obj.mean_img #(d1, d2) shape
     data_spatial_basis = load_obj.spatial_basis.reshape((load_obj.shape[0], load_obj.shape[1], -1), order=load_obj.order)
@@ -509,16 +507,13 @@ def localmd_decomposition(filename, block_sizes, overlap, frame_range, max_compo
     column_indices = []
     row_indices = []
     spatial_overall_values = []
+    
     for k in dim_1_iters:
         for j in dim_2_iters:
             pairs.append((k, j))
             subset = data[k:k+block_sizes[0], j:j+block_sizes[1], :].astype(dtype)
-
             projected_data = np.random.randn(subset.shape[2], max_components).astype(dtype)
-            crop_mean_img = data_mean_img[k:k+block_sizes[0], j:j+block_sizes[1]]
-            crop_std_img = data_std_img[k:k+block_sizes[0], j:j+block_sizes[1]]
-            crop_spatial_basis = data_spatial_basis[k:k+block_sizes[0], j:j+block_sizes[1], :]
-            spatial_comps, decisions, _ = filter_and_decompose(subset, crop_mean_img, crop_std_img, crop_spatial_basis, projected_data, spatial_thres, temporal_thres, max_consec_failures)
+            spatial_comps, decisions, _ = single_block_md(subset, projected_data, spatial_thres, temporal_thres, max_consec_failures)
 
             spatial_comps = np.array(spatial_comps).astype(dtype)
             dim_1_val = k
@@ -544,6 +539,7 @@ def localmd_decomposition(filename, block_sizes, overlap, frame_range, max_compo
             
     
     U_r = scipy.sparse.coo_matrix((spatial_overall_values, (column_indices, row_indices)), shape=(data.shape[0]*data.shape[1], row_number))
+    display("The total number of identified components before pruning is {}".format(U_r.shape[1]))
     
     display("Computing projector for sparse regression step")
     projector = get_projector(U_r)
