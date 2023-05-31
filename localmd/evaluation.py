@@ -88,32 +88,70 @@ def total_variation_stat(img):
     return jnp.sum(accumulator)
 
 #@partial(jit)
-def spatial_roughness_stat(img):
+# def spatial_roughness_stat(img):
+#     '''
+#     Input: 
+#         img: jnp.array, dimensions (d1, d2) where d1 and d2 are image FOV dimensions
+#     Output: 
+#         stat: float. spatial roughness statistic
+    
+#     '''
+#     img = img / jnp.linalg.norm(img)
+#     numerator = total_variation_stat(img)
+#     denominator = l1_norm(img)
+#     return numerator/denominator
+
+def spatial_roughness_stat(u):
     '''
     Input: 
-        img: jnp.array, dimensions (d1, d2) where d1 and d2 are image FOV dimensions
-    Output: 
-        stat: float. spatial roughness statistic
+        jax.numpy.array, u. Shape (d1, d2)
     
+    Computes ratio of total variatio and l1 norm for u
     '''
-    img = img / jnp.linalg.norm(img)
-    numerator = total_variation_stat(img)
-    denominator = l1_norm(img)
-    return numerator/denominator
+    
+    lower_vert = jax.lax.dynamic_slice(u, (1, 0), (u.shape[0]-1,u.shape[1]))
+    upper_vert = jax.lax.dynamic_slice(u, (0, 0), (u.shape[0]-1, u.shape[1]))
+    
+    vert_diffs = jnp.abs(lower_vert - upper_vert)
+    
+    left_horz = jax.lax.dynamic_slice(u, (0,0), (u.shape[0], u.shape[1]-1))
+    right_horz = jax.lax.dynamic_slice(u, (0, 1), (u.shape[0], u.shape[1]-1))
+    
+    horz_diffs = jnp.abs(left_horz - right_horz)
+    avg_diff = (jnp.sum(vert_diffs) + jnp.sum(horz_diffs))/(vert_diffs.shape[0]*vert_diffs.shape[1] + horz_diffs.shape[0]*horz_diffs.shape[1])
+    
+    avg_elem = jnp.mean(jnp.abs(u))
+    
+    return avg_diff / avg_elem
+
 
 #@partial(jit)
-def temporal_roughness_stat(trace):
+# def temporal_roughness_stat(trace):
+#     '''
+#     Input: 
+#         img: jnp.array, shape (T,) where T is the length of the temporal trace
+#     Output: 
+#         stat: float. temporal roughness statistic statistic
+    
+#     '''
+#     trace = trace / jnp.linalg.norm(trace)
+#     numerator = trend_filter_stat(trace)
+#     denominator = l1_norm(trace)
+#     return numerator/denominator
+
+
+def temporal_roughness_stat(v):
     '''
     Input: 
-        img: jnp.array, shape (T,) where T is the length of the temporal trace
-    Output: 
-        stat: float. temporal roughness statistic statistic
+        v: jax.numpy.array. Dimenion (T)
     
     '''
-    trace = trace / jnp.linalg.norm(trace)
-    numerator = trend_filter_stat(trace)
-    denominator = l1_norm(trace)
-    return numerator/denominator
+    v_left = jax.lax.dynamic_slice(v, (0,), (v.shape[0]-2,))
+    v_right = jax.lax.dynamic_slice(v, (2,), (v.shape[0]-2,))
+    v_middle = jax.lax.dynamic_slice(v, (1,), (v.shape[0]-2,))
+    
+    return jnp.mean(jnp.abs(v_left + v_right - 2*v_middle)) / jnp.mean(jnp.abs(v))
+
 
 spatial_roughness_stat_vmap = vmap(spatial_roughness_stat, in_axes=(2))
 temporal_roughness_stat_vmap = vmap(temporal_roughness_stat, in_axes=(0))
