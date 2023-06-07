@@ -175,9 +175,15 @@ def iterative_rank_1_approx(test_data):
     return final_pytree
 
 
-#@partial(jit)
-def truncated_random_svd(input_matrix, random_data):
-    desired_rank = random_data.shape[1]
+@partial(jit, static_argnums=(2,3))
+def truncated_random_svd(input_matrix, key, rank, num_oversamples=10):
+    '''
+    Key: This function assumes that (1) rank + num_oversamples is less than all dimensions of the input_matrix and (2) num_oversmples >= 1
+    
+    '''
+    d = input_matrix.shape[0]
+    T = input_matrix.shape[1]
+    random_data = jax.random.normal(key, (T, rank + num_oversamples))
     projected = jnp.matmul(input_matrix, random_data)
     Q, R = jnp.linalg.qr(projected)
     B = jnp.matmul(Q.T, input_matrix)
@@ -185,7 +191,11 @@ def truncated_random_svd(input_matrix, random_data):
     
     U_final = Q.dot(U)
     V = jnp.multiply(jnp.expand_dims(s, axis=1), V)
-    return [U_final, V]
+    
+    #Final step: prune the rank 
+    U_truncated = jax.lax.dynamic_slice(U_final, (0, 0), (U_final.shape[0], rank))
+    V_truncated = jax.lax.dynamic_slice(V, (0, 0), (rank, V.shape[1]))
+    return [U_truncated, V_truncated]
 
 
 
@@ -202,11 +212,11 @@ def iterative_rank_1_approx_sims(test_data):
 
 
 
-@partial(jit)
-def decomposition_no_normalize_approx(block, random_projection_mat):
+@partial(jit, static_argnums=(2,))
+def decomposition_no_normalize_approx(block, key, max_rank):
     d1, d2, T = block.shape
     block_2d = jnp.reshape(block, (d1*d2, T), order="F")
-    decomposition = truncated_random_svd(block_2d, random_projection_mat)
+    decomposition = truncated_random_svd(block_2d, key, max_rank)
     
     u_mat, v_mat = decomposition[0], decomposition[1]
     u_mat = jnp.reshape(u_mat, (d1, d2, u_mat.shape[1]), order="F")
@@ -245,23 +255,28 @@ def make_matrix(d1, d2, T, num_comps, key):
     return noise_data, random_projection
   
 @partial(jit, static_argnums=(0,1,2,3))
-def rank_simulation(d1, d2, T, num_comps, key):
-    noise_data, random_projection = make_matrix(d1, d2, T, num_comps, key)
-    spatial, temporal = decomposition_no_normalize_approx(noise_data, random_projection)
+def rank_simulation(d1, d2, T, num_comps, key1, key2):
+    # noise_data, random_projection = make_matrix(d1, d2, T, num_comps, key)
+    noise_data = jax.random.normal(key1, (d1, d2, T))
+    spatial, temporal = decomposition_no_normalize_approx(noise_data, key2, num_comps)
     return spatial, temporal
 
-
-def threshold_heuristic(dimensions, num_comps=1, iters = 250, percentile_threshold =5):
-
+def make_jax_random_key():
     ii32 = np.iinfo(np.int32)
+    prng_input = np.random.randint(low=ii32.min, high=ii32.max,size=1, dtype=np.int32)[0]
+    key = jax.random.PRNGKey(prng_input)
+    
+    return key
+
+def threshold_heuristic(dimensions, num_comps=1, iters = 250, percentile_threshold = 5):
     spatial_list = []
     temporal_list = []
     
     d1, d2, T = dimensions
     for k in range(iters):
-        prng_input = np.random.randint(low=ii32.min, high=ii32.max,size=1, dtype=np.int32)[0]
-        key = jax.random.PRNGKey(prng_input)
-        x, y = rank_simulation(d1, d2, T, num_comps, key)
+        key1 = make_jax_random_key()
+        key2 = make_jax_random_key()
+        x, y = rank_simulation(d1, d2, T, num_comps, key1, key2)
         spatial_list.append(x)
         temporal_list.append(y)
 
@@ -293,8 +308,8 @@ def filter_and_decompose(block,mean_img, std_img,spatial_basis, projection_data,
     
     return single_block_md(block, projection_data, spatial_thres, temporal_thres, max_consec_failures)
     
-@partial(jit)
-def single_block_md(block, projection_data, spatial_thres, temporal_thres, max_consec_failures):
+@partial(jit, static_argnums=(2,))
+def single_block_md(block, key, max_rank, spatial_thres, temporal_thres, max_consec_failures):
     '''
     Matrix Decomposition function for all blocks. 
     Inputs: 
@@ -308,8 +323,7 @@ def single_block_md(block, projection_data, spatial_thres, temporal_thres, max_c
     block_2d = jnp.reshape(block, (d1*d2, T), order="F")
     
     
-    
-    decomposition = truncated_random_svd(block_2d, projection_data)
+    decomposition = truncated_random_svd(block_2d, key, max_rank)
     u_mat, v_mat = decomposition[0], decomposition[1]
     u_mat = jnp.reshape(u_mat, (d1, d2, u_mat.shape[1]), order="F")
 
@@ -512,8 +526,9 @@ def localmd_decomposition(filename, block_sizes, overlap, frame_range, max_compo
         for j in dim_2_iters:
             pairs.append((k, j))
             subset = data[k:k+block_sizes[0], j:j+block_sizes[1], :].astype(dtype)
-            projected_data = np.random.randn(subset.shape[2], max_components).astype(dtype)
-            spatial_comps, decisions, _ = single_block_md(subset, projected_data, spatial_thres, temporal_thres, max_consec_failures)
+            # projected_data = np.random.randn(subset.shape[2], max_components).astype(dtype)
+            key = make_jax_random_key()
+            spatial_comps, decisions, _ = single_block_md(subset, key, max_components, spatial_thres, temporal_thres, max_consec_failures)
 
             spatial_comps = np.array(spatial_comps).astype(dtype)
             dim_1_val = k
