@@ -405,7 +405,7 @@ class tiff_loader():
 
     def _calculate_background_filter(self, n_samples = 1000):
         if self.background_rank <= 0:
-            return (np.zeros((self.shape[0]*self.shape[1], 1)).astype(self.dtype), np.zeros((1, self.shape[2])).astype(self.dtype))
+            return np.zeros((self.shape[0]*self.shape[1], 1)).astype(self.dtype)
         sample_list = [i for i in range(0, self.shape[2])]
         random_data = np.random.choice(sample_list,replace=False, size=min(n_samples, self.shape[2]))
         crop_data = self.temporal_crop_standardized(random_data)
