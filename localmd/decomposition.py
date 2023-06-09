@@ -376,7 +376,7 @@ def get_projector(U):
 
 
  
-def factored_svd(spatial_components, temporal_components, device='cpu', explained_variance_threshold = 0.995):
+def factored_svd(spatial_components, temporal_components, device='cpu', factor=1):
     '''
     Given a matrix factorization M=UQ (with U sparse) factorizes Q = RSVt so
     that [UR]SVt is the SVD of M.
@@ -417,9 +417,34 @@ def factored_svd(spatial_components, temporal_components, device='cpu', explaine
     temporal_basis = torch.matmul(eig_vecs.t(), Qt.t())
     
     #Here we prune the factorized SVD 
-    return rank_prune_svd(mixing_weights, singular_values, temporal_basis, explained_variance_threshold)
+    return rank_prune_svd(mixing_weights, singular_values, temporal_basis, factor=factor)
 
-def rank_prune_svd(mixing_weights, singular_values, temporal_basis, explained_variance_threshold = 0.995):
+
+def rank_prune_svd(mixing_weights, singular_values, temporal_basis, factor=0.25):
+    '''
+    Inputs: 
+        mixing_weights: torch.Tensor, shape (R x R)
+        singular_values: torch.Tensor, shape (R)
+        temporal_basis: torch.Tensor, shape (R, T)
+        explained_variance: float between 0 and 1. The fraction of explained variance which we would like to explain. 
+    '''
+    
+    dimension = singular_values.shape[0]
+    index = int(math.floor(factor * dimension))
+    if index == 0:
+        pass
+    elif index > singular_values.shape[0]:
+        pass
+    else:
+        mixing_weights = mixing_weights[:, :index]
+        singular_values = singular_values[:index]
+        temporal_basis = temporal_basis[:index, :]
+    display("The rank was originally {} now it is {}".format(dimension, mixing_weights.shape[1]))
+    return mixing_weights, singular_values, temporal_basis
+    
+
+
+def rank_prune_svd_variance(mixing_weights, singular_values, temporal_basis, explained_variance_threshold = 0.995):
     '''
     Inputs: 
         mixing_weights: torch.Tensor, shape (R x R)
@@ -460,7 +485,7 @@ def rank_prune_svd(mixing_weights, singular_values, temporal_basis, explained_va
         
     return mixing_weights, singular_values, temporal_basis
 
-def localmd_decomposition(filename, block_sizes, overlap, frame_range, max_components=50, background_rank=15, sim_conf=5, batching=10, tiff_batch_size = 10000, dtype='float32', order="F", num_workers=0, pixel_batch_size=5000, frame_corrector_obj = None, max_consec_failures = 1, explained_variance_threshold=0.995):
+def localmd_decomposition(filename, block_sizes, overlap, frame_range, max_components=50, background_rank=15, sim_conf=5, batching=10, tiff_batch_size = 10000, dtype='float32', order="F", num_workers=0, pixel_batch_size=5000, frame_corrector_obj = None, max_consec_failures = 1, rank_prune_factor=1):
     
     if torch.cuda.is_available():
             device='cuda'
@@ -588,7 +613,7 @@ def localmd_decomposition(filename, block_sizes, overlap, frame_range, max_compo
 
     ## Step 2h: Do a SVD Reformat given U and V
     display("Running QR decomposition on V")
-    R, s, Vt = factored_svd(U_r, V, device='cpu', explained_variance_threshold=explained_variance_threshold)
+    R, s, Vt = factored_svd(U_r, V, device='cpu', factor = rank_prune_factor)
 
     display("Matrix decomposition completed")
 
