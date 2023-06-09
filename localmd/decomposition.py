@@ -199,6 +199,7 @@ def truncated_random_svd(input_matrix, key, rank, num_oversamples=10):
 
 
 
+
 @partial(jit)
 def iterative_rank_1_approx_sims(test_data):
     num_iters = 3
@@ -521,12 +522,12 @@ def localmd_decomposition(filename, block_sizes, overlap, frame_range, max_compo
     column_indices = []
     row_indices = []
     spatial_overall_values = []
+    cumulative_weights = np.zeros((data.shape[0], data.shape[1]))
     
     for k in dim_1_iters:
         for j in dim_2_iters:
             pairs.append((k, j))
             subset = data[k:k+block_sizes[0], j:j+block_sizes[1], :].astype(dtype)
-            # projected_data = np.random.randn(subset.shape[2], max_components).astype(dtype)
             key = make_jax_random_key()
             spatial_comps, decisions, _ = single_block_md(subset, key, max_components, spatial_thres, temporal_thres, max_consec_failures)
 
@@ -536,7 +537,12 @@ def localmd_decomposition(filename, block_sizes, overlap, frame_range, max_compo
             
             decisions = np.array(decisions).flatten() > 0
             spatial_cropped = spatial_comps[:, :, decisions]
+            
+            #Weight the spatial components here
             spatial_cropped = spatial_cropped * block_weights[:, :, None]
+            current_cumulative_weight = block_weights * spatial_cropped.shape[2]
+            cumulative_weights[k:k+block_sizes[0], j:j+block_sizes[1]] += current_cumulative_weight
+            
             sparse_col_indices = sparse_indices[k:k+block_sizes[0], j:j+block_sizes[1]][:, :, None]
             sparse_col_indices = sparse_col_indices + np.zeros((1, 1, spatial_cropped.shape[2]))
             sparse_row_indices = np.zeros_like(sparse_col_indices)
@@ -554,7 +560,17 @@ def localmd_decomposition(filename, block_sizes, overlap, frame_range, max_compo
             
     
     U_r = scipy.sparse.coo_matrix((spatial_overall_values, (column_indices, row_indices)), shape=(data.shape[0]*data.shape[1], row_number))
+    
+    display("Normalizing by weights")
+    weight_normalization_diag = np.zeros((data.shape[0]*data.shape[1],))
+    weight_normalization_diag[sparse_indices.flatten()] = cumulative_weights.flatten()
+    normalizing_weights = scipy.sparse.diags(
+        [(1 / weight_normalization_diag).ravel()], [0])
+    U_r = normalizing_weights.dot(U_r)
+    
     display("The total number of identified components before pruning is {}".format(U_r.shape[1]))
+    
+    
     
     display("Computing projector for sparse regression step")
     projector = get_projector(U_r)
