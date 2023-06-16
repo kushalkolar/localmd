@@ -47,6 +47,8 @@ import functools
 from functools import partial
 
 
+import pdb
+
 def display(msg):
     """
     Printing utility that logs time and flushes.
@@ -54,11 +56,24 @@ def display(msg):
     tag = '[' + datetime.datetime.today().strftime('%y-%m-%d %H:%M:%S') + ']: '
     sys.stdout.write(tag + msg + '\n')
     sys.stdout.flush()
-    
+   
 
-@partial(jit)
-def truncated_random_svd(input_matrix, random_data):
-    desired_rank = random_data.shape[1]
+def make_jax_random_key():
+    ii32 = np.iinfo(np.int32)
+    prng_input = np.random.randint(low=ii32.min, high=ii32.max,size=1, dtype=np.int32)[0]
+    key = jax.random.PRNGKey(prng_input)
+    
+    return key
+
+@partial(jit, static_argnums=(2,3))
+def truncated_random_svd(input_matrix, key, rank, num_oversamples=10):
+    '''
+    Key: This function assumes that (1) rank + num_oversamples is less than all dimensions of the input_matrix and (2) num_oversmples >= 1
+    
+    '''
+    d = input_matrix.shape[0]
+    T = input_matrix.shape[1]
+    random_data = jax.random.normal(key, (T, rank + num_oversamples))
     projected = jnp.matmul(input_matrix, random_data)
     Q, R = jnp.linalg.qr(projected)
     B = jnp.matmul(Q.T, input_matrix)
@@ -66,7 +81,11 @@ def truncated_random_svd(input_matrix, random_data):
     
     U_final = Q.dot(U)
     V = jnp.multiply(jnp.expand_dims(s, axis=1), V)
-    return [U_final, V]
+    
+    #Final step: prune the rank 
+    U_truncated = jax.lax.dynamic_slice(U_final, (0, 0), (U_final.shape[0], rank))
+    V_truncated = jax.lax.dynamic_slice(V, (0, 0), (rank, V.shape[1]))
+    return [U_truncated, V_truncated]
 
     
 
@@ -409,9 +428,10 @@ class tiff_loader():
         sample_list = [i for i in range(0, self.shape[2])]
         random_data = np.random.choice(sample_list,replace=False, size=min(n_samples, self.shape[2]))
         crop_data = self.temporal_crop_standardized(random_data)
-        projection_data = np.random.randn(crop_data.shape[-1], int(self.background_rank)).astype(self.dtype)
-        spatial_basis, _ = truncated_random_svd(crop_data.reshape((-1, crop_data.shape[-1]), order=self.order), projection_data)        
-        return spatial_basis.astype(self.dtype)
+        # projection_data = np.random.randn(crop_data.shape[-1], int(self.background_rank)).astype(self.dtype)
+        key = make_jax_random_key()
+        spatial_basis, _ = truncated_random_svd(crop_data.reshape((-1, crop_data.shape[-1])), key, self.background_rank)
+        return np.array(spatial_basis).astype(self.dtype)
    
 
     def V_projection_torch(self, M):
@@ -505,7 +525,7 @@ class tiff_loader():
         
         result = np.zeros((inv_term.shape[0], self.shape[2]), dtype=self.dtype)
         mean_img_r = self.mean_img.reshape((-1, 1), order=self.order)
-        std_img_r = self.std_img.reshape((1, -1), order=self.order)
+        std_img_r = self.std_img.reshape((-1, 1), order=self.order)
         start = 0
         temporal_basis = np.zeros((self.spatial_basis.shape[1], self.shape[2]), dtype=self.dtype)
         
@@ -523,7 +543,6 @@ class tiff_loader():
 
         start = 0
         for i, data in enumerate(tqdm(self.loader_vanilla), 0):
-
             temporal_basis_chunk, output = full_V_projection_routine(self.order, registration_method, inv_term,sparse_projection_term, data, self.spatial_basis, mean_img_r, std_img_r)
             num_frames_chunk = output.shape[1]
             
@@ -569,29 +588,30 @@ def standardize_and_filter(new_data, mean_img, std_img, spatial_basis):
 
     return jnp.reshape(new_data, (d1, d2, T), order="F")
                                        
-                                    
-#@jit
+
+@partial(jit)
 def get_temporal_basis_jax(D, spatial_basis, mean_img_r, std_img_r):
     #Get the relevant temporal component given the spatial basis: 
-    spatial_basis = spatial_basis / std_img_r.transpose()
-    spatialxdata = jnp.matmul(spatial_basis.transpose(), D) 
-    spatialxmean = jnp.matmul(spatial_basis.transpose(), mean_img_r)
+    '''
+    Variables: 
+        d (or (d1, d2) where d1*d2 = d): number of pixels of subchunk of data
+        T: number of frames of subchunk of data
+        K: rank of full FOV spatial basis
+    Inputs: 
+        - D: jnp.array, dimensions (d, T)
+        - spatial_basis: shape (d, K). Key assumption: columns of spatial basis are orthonormal
+        - mean_img_r: shape (d, 1)
+        - std_img_r: shape (d, 1)
+    NOTE: this method is faster than normalizing the matrix D first then multiplying by spatial_basis, since it immediately
+    collapses everything to a d x K matrix. 
+    '''
+
+    spatial_basis_norm = jnp.divide(spatial_basis, std_img_r)
+    spatialxdata = jnp.matmul(spatial_basis_norm.transpose(), D) 
+    spatialxmean = jnp.matmul(spatial_basis_norm.transpose(), mean_img_r)
     diff = spatialxdata - spatialxmean
     
     return diff
-
-
-def get_temporal_basis(D, spatial_basis, mean_img_r, std_img_r):
-    #Get the relevant temporal component given the spatial basis: 
-    spatial_basis_norm = spatial_basis / std_img_r.t()
-    spatialxdata = torch.matmul(spatial_basis_norm.t(), D) 
-    spatialxmean = torch.matmul(spatial_basis_norm.t(), mean_img_r)
-    diff = spatialxdata - spatialxmean
-    
-    return diff
-
-
-
 
 def V_projection_routine(M_std, D, spatial_basis, mean_img_r, std_img_r):
     temporal_basis_chunk = get_temporal_basis(D, spatial_basis, mean_img_r, std_img_r)
@@ -614,13 +634,27 @@ def V_projection_routine_jax(order, inv_term, M, D, spatial_basis, mean_img_r, s
 
 @sparse.sparsify
 def V_projection_inner_loop(inv_term, M, D, spatial_basis, mean_img_r, std_img_r):
+    '''
+    Variables: 
+        R: Current rank of decomposition 
+        d (or (d1, d2) where d1*d2 = d): number of pixels of subchunk of data
+        T: number of frames of subchunk of data
+        K: rank of full FOV spatial basis
+    Params: 
+        - inv_term: shape (R, R)
+        - M: shape (R, d)
+        - spatial_basis: shape (d, 1)
+        - mean_img_r: shape (d, 1)
+        - std_img_r: shape (d, 1)
+        
+    '''
     
-    M = M/std_img_r
+    M_std = M/std_img_r.transpose()
     temporal_basis_chunk = get_temporal_basis_jax(D, spatial_basis, mean_img_r, std_img_r)
-    MD = jnp.matmul(M, D)
+    MD = jnp.matmul(M_std, D)
     Ma1 = jnp.matmul(M, spatial_basis)
     Ma1a2 = jnp.matmul(Ma1, temporal_basis_chunk)
-    M_mean = jnp.matmul(M, mean_img_r)
+    M_mean = jnp.matmul(M_std, mean_img_r)
 
     output = MD - Ma1a2 - M_mean
 
