@@ -329,7 +329,7 @@ def single_block_md(block, key, max_rank, spatial_thres, temporal_thres, max_con
     u_mat = jnp.reshape(u_mat, (d1, d2, u_mat.shape[1]), order="F")
 
     
-#     ##Now we begin the evaluation phase
+    # Now we begin the evaluation phase
     good_comps = construct_final_fitness_decision(u_mat, v_mat.T, spatial_thres,\
                                                   temporal_thres, max_consec_failures)
     
@@ -349,13 +349,8 @@ def append_decomposition_results(curr_results, new_results):
     
     return curr_results
 
-def cast_decomposition_results(new_results, cast):
-    return (np.array(new_results[0], dtype=cast), np.array(new_results[1], dtype=cast), np.array(new_results[2], dtype=cast))
-
-
 
 def get_projector(U):
-    #TODO: Use Pytorch_sparse to accelerate the matmul on GPU/TPU... (may be overkill)
     '''
     Input: 
         U: matrix of dimensions (d, R) where d is number of pixels, R is number of frames
@@ -369,8 +364,6 @@ def get_projector(U):
     final_matrix_r_sparse = scipy.sparse.coo_matrix(U)
     prod = (final_matrix_r_sparse.T.dot(final_matrix_r_sparse)).toarray()
     theta = np.array(jnp.linalg.inv(prod))
-    # projector = (final_matrix_r_sparse.dot(theta.T)).T #Do it like this to take advantage of sparsity using scipy not np
-    # return projector
     return (final_matrix_r_sparse.T, theta)
 
 
@@ -442,48 +435,6 @@ def rank_prune_svd(mixing_weights, singular_values, temporal_basis, factor=0.25)
     display("The rank was originally {} now it is {}".format(dimension, mixing_weights.shape[1]))
     return mixing_weights, singular_values, temporal_basis
     
-
-
-def rank_prune_svd_variance(mixing_weights, singular_values, temporal_basis, explained_variance_threshold = 0.995):
-    '''
-    Inputs: 
-        mixing_weights: torch.Tensor, shape (R x R)
-        singular_values: torch.Tensor, shape (R)
-        temporal_basis: torch.Tensor, shape (R, T)
-        explained_variance: float between 0 and 1. The fraction of explained variance which we would like to explain. 
-    '''
-    device = mixing_weights.device
-    mixing_weights = mixing_weights
-    singular_values = singular_values
-    temporal_basis = temporal_basis
-    
-    singular_values_normalized = singular_values / torch.amax(singular_values) #We assume no divide by zero here
-    squared_singular_values = singular_values_normalized * singular_values_normalized
-    total_featurewise_variance = torch.sum(squared_singular_values)
-    if total_featurewise_variance > 0:
-        squared_singular_values /= total_featurewise_variance
-    squared_singular_values_cumulative = torch.cumsum(squared_singular_values, dim=0)
-    above_threshold = squared_singular_values_cumulative > explained_variance_threshold
-    
-    nonzero_above_threshold = torch.nonzero(above_threshold)
-    if nonzero_above_threshold.numel() == 0:
-        display("This threshold was too high")
-        return mixing_weights, singular_values, temporal_basis
-    ## Add a check here to verify that torch nonzero is actually good
-    critical_index = torch.min(nonzero_above_threshold)
-    
-    
-    if torch.index_select(squared_singular_values_cumulative, 0, critical_index) <= explained_variance_threshold:
-        display("Warning: for unknown reasons the index did not meet threshold, potential bug") 
-        return mixing_weights, singular_values, temporal_basis
-    else:
-        display("Rank Pruning has been applied. The rank was {}, now it is {}. We have pruned {:.2f} of the components".format(mixing_weights.shape[1], critical_index+1, 1 - (critical_index+1) / mixing_weights.shape[1]))
-        keep_indices = torch.arange(critical_index + 1, device=device)
-        mixing_weights = torch.index_select(mixing_weights, 1, keep_indices) 
-        singular_values = torch.index_select(singular_values, 0, keep_indices)
-        temporal_basis = torch.index_select(temporal_basis, 0, keep_indices)
-        
-    return mixing_weights, singular_values, temporal_basis
 
 def localmd_decomposition(filename, block_sizes, overlap, frame_range, max_components=50, background_rank=15, sim_conf=5, batching=10, tiff_batch_size = 10000, dtype='float32', order="F", num_workers=0, pixel_batch_size=5000, frame_corrector_obj = None, max_consec_failures = 1, rank_prune_factor=1):
     
