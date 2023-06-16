@@ -18,7 +18,6 @@ import torch.utils.dlpack
 import functools
 from functools import partial
 import torch
-import torch_sparse
 import torch.multiprocessing as multiprocessing
 
 import scipy.sparse
@@ -46,7 +45,6 @@ from jax import jit, vmap
 import functools
 from functools import partial
 
-
 import pdb
 
 def display(msg):
@@ -57,7 +55,6 @@ def display(msg):
     sys.stdout.write(tag + msg + '\n')
     sys.stdout.flush()
    
-
 def make_jax_random_key():
     ii32 = np.iinfo(np.int32)
     prng_input = np.random.randint(low=ii32.min, high=ii32.max,size=1, dtype=np.int32)[0]
@@ -428,69 +425,9 @@ class tiff_loader():
         sample_list = [i for i in range(0, self.shape[2])]
         random_data = np.random.choice(sample_list,replace=False, size=min(n_samples, self.shape[2]))
         crop_data = self.temporal_crop_standardized(random_data)
-        # projection_data = np.random.randn(crop_data.shape[-1], int(self.background_rank)).astype(self.dtype)
         key = make_jax_random_key()
         spatial_basis, _ = truncated_random_svd(crop_data.reshape((-1, crop_data.shape[-1])), key, self.background_rank)
         return np.array(spatial_basis).astype(self.dtype)
-   
-
-    def V_projection_torch(self, M):
-        '''
-        M is a tuple, consisting of two elements
-            Element 0: A scipy.sparse.coo_matrix of dimensions (d, R)
-            Element 1: A (R, R) np.ndarray. 
-        '''
-        if torch.cuda.is_available():
-            device='cuda'
-        else:
-            device='cpu'
-            
-        torch_dtype=torch.float
-        U_mat = M[0]
-        Inv_mat = M[1]
-        
-        result = torch.zeros((U_mat.shape[1], self.shape[2]), dtype=torch_dtype).to(device)
-        mean_img_r = torch.Tensor(self.mean_img.reshape((-1, 1), order=self.order)).to(device)
-        std_img_r = torch.Tensor(self.std_img.reshape((1, -1), order=self.order)).to(device)
-        spatial_basis_torch = torch.Tensor(np.array(self.spatial_basis)).to(device)
-        
-        #Normalize the columns of the sparse projection matrix U_mat ahead of time (this is equivalent to normalizing the rows of each input data point)
-        diagonal_elements = self.std_img.reshape((-1,), order=self.order)
-        diagonal_elements[diagonal_elements == 0] = 1
-        diagonal_elements = np.reciprocal(diagonal_elements)
-        diagonal_matrix = scipy.sparse.diags(diagonal_elements, shape=(U_mat.shape[0], U_mat.shape[0])).tocsr()
-        U_mat_normalized = diagonal_matrix.dot(U_mat)
-        U_mat_torch = torch_sparse.tensor.from_scipy(U_mat_normalized.transpose()).type(torch_dtype).to(device)
-        temporal_basis = torch.zeros((self.spatial_basis.shape[1], self.shape[2]), dtype=torch_dtype)
-        
-        start = 0
-        for i, data in enumerate(tqdm(self.loader), 0):
-            #Convert data to tensor 
-            start_time = time.time()
-            
-            D = data_reshape_jax(self.order, data) 
-            D_torch = jax2torch(D, device)
-            D_torch_time = time.time() - start_time
-            
-            start_time = time.time()
-            temporal_basis_chunk,output = V_projection_routine(U_mat_torch, D_torch, spatial_basis_torch, mean_img_r, std_img_r)
-            routine_time = time.time() - start_time
-            
-            start_time = time.time()
-            num_frames_chunk = output.shape[1]
-            endpt = min(self.shape[2], start+num_frames_chunk)
-            temporal_basis[:, start:endpt] = temporal_basis_chunk
-            result[:, start:endpt] = output
-            start = endpt
-            write_time = time.time() - start_time
-            
-            display("D_time {} routine_time {} writing_time {}".format(D_torch_time, routine_time, write_time))
-            
-            
-        projected_V = Inv_mat.dot(result.detach().cpu().numpy())
-        self.temporal_basis = temporal_basis.detach().cpu().numpy()
-        return projected_V
-
             
 
     def V_projection(self, M):
@@ -573,7 +510,7 @@ class tiff_loader():
         
         
 
-@jit
+@partial(jit)
 def standardize_and_filter(new_data, mean_img, std_img, spatial_basis):
     new_data -= jnp.expand_dims(mean_img, 2)
     new_data /= jnp.expand_dims(std_img, 2)
@@ -591,8 +528,9 @@ def standardize_and_filter(new_data, mean_img, std_img, spatial_basis):
 
 @partial(jit)
 def get_temporal_basis_jax(D, spatial_basis, mean_img_r, std_img_r):
-    #Get the relevant temporal component given the spatial basis: 
     '''
+    Get the relevant temporal component given the spatial basis: 
+    
     Variables: 
         d (or (d1, d2) where d1*d2 = d): number of pixels of subchunk of data
         T: number of frames of subchunk of data
@@ -612,19 +550,6 @@ def get_temporal_basis_jax(D, spatial_basis, mean_img_r, std_img_r):
     diff = spatialxdata - spatialxmean
     
     return diff
-
-def V_projection_routine(M_std, D, spatial_basis, mean_img_r, std_img_r):
-    temporal_basis_chunk = get_temporal_basis(D, spatial_basis, mean_img_r, std_img_r)
-    MD = torch_sparse.matmul(M_std, D)
-    Ma1 = torch_sparse.matmul(M_std, spatial_basis)
-    Ma1a2 = torch.matmul(Ma1, temporal_basis_chunk)
-    M_mean = torch_sparse.matmul(M_std, mean_img_r)
-    
-    output = MD
-    output.sub_(Ma1a2)
-    output.sub_(M_mean)
-    
-    return temporal_basis_chunk, output
 
 @partial(jit, static_argnums=(0))
 def V_projection_routine_jax(order, inv_term, M, D, spatial_basis, mean_img_r, std_img_r):
@@ -648,7 +573,6 @@ def V_projection_inner_loop(inv_term, M, D, spatial_basis, mean_img_r, std_img_r
         - std_img_r: shape (d, 1)
         
     '''
-    
     M_std = M/std_img_r.transpose()
     temporal_basis_chunk = get_temporal_basis_jax(D, spatial_basis, mean_img_r, std_img_r)
     MD = jnp.matmul(M_std, D)
@@ -661,22 +585,8 @@ def V_projection_inner_loop(inv_term, M, D, spatial_basis, mean_img_r, std_img_r
     output = jnp.dot(inv_term, output)
 
     return temporal_basis_chunk, output
-
-
-
-@partial(jit, static_argnums=(0))
-def data_reshape_jax(order, D):
-    D = jnp.transpose(D, (1,2,0))
-    D = jnp.reshape(D, (-1, D.shape[2]), order=order)
-    return D
-    
-
   
 @partial(jit)
 def filter_components(data, spatial_r, temporal_basis):
     subt = jnp.tensordot(spatial_r, temporal_basis, axes=(2, 0))
     return data - subt
-  
-                
-def jax2torch(x, device):
-    return torch.utils.dlpack.from_dlpack(jax.dlpack.to_dlpack(x)).to(device)
