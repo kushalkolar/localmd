@@ -7,6 +7,20 @@ import functools
 from functools import partial
 
 @partial(jit)
+def get_mean_and_noise(movie, mean_divisor):
+    '''
+    This function is used to sum the movie chunk (and divide by total number of frames in ENTIRE movie, not the movie chunk) and to also calculate the noise variance in this chunk. 
+    '''
+    sum_val = jnp.sum(movie, axis = 2) / mean_divisor
+    d1, d2, T = movie.shape
+    movie_centered_2d = jnp.reshape(movie, (d1*d2, T), order="F")
+    noise_estimate_1d = get_noise_estimate_vmap(movie_centered_2d)
+    noise_estimate_2d = jnp.reshape(noise_estimate_1d, (d1, d2), order="F")
+    return sum_val, noise_estimate_2d
+
+    
+
+
 def get_noise_estimate(trace):
     output_welch = jax.scipy.signal.welch(trace, noverlap=128)
     start = int(256/4 + 1)
@@ -14,10 +28,26 @@ def get_noise_estimate(trace):
 
     indices = jnp.arange(start, end)
     values = jnp.take(output_welch[1], indices) * 0.5
-    sum_values = jnp.sqrt(jnp.sum(values))
+    sum_values = jnp.sum(values)
 
-    return sum_values / (end - start)
+    return jnp.sqrt(sum_values / (end - start))
 
+get_noise_estimate_vmap = vmap(get_noise_estimate, in_axes = (0))
+
+@partial(jit)
+def center_and_get_noise_estimate(movie, mean):
+    '''
+    Goal of this function is to estimate the noise of a movie given the mean
+    Input: 
+        movie: (j)np.ndarray. Dimensions (d1, d2, T), type float
+        mean: (j)np.ndarray. Dimensions (d1, d2)
+    '''
+    d1, d2, T = movie.shape
+    movie_centered_3d = jnp.subtract(movie, jnp.expand_dims(mean, axis = 2))
+    movie_centered_2d = jnp.reshape(movie_centered_3d, (d1*d2, T), order="F")
+    noise_estimate_1d = get_noise_estimate_vmap(movie_centered_2d)
+    noise_estimate_2d = jnp.reshape(noise_estimate_1d, (d1, d2), order="F")
+    return noise_estimate_2d
 
 @partial(jit)
 def get_mean(trace):
@@ -51,3 +81,4 @@ def standardize_block(block):
     updated_2d = center_and_noise_normalize_vmap(block_2d)
     updated_3d = jnp.reshape(updated_2d, (d1, d2, T), order="F")
     return updated_3d
+
