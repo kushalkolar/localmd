@@ -2,6 +2,7 @@ import jax
 import jax.scipy
 import jax.numpy as jnp
 from jax import jit, vmap
+
 import functools
 from functools import partial
 import time
@@ -33,9 +34,6 @@ import jax.numpy as jnp
 from jax import jit, vmap
 import functools
 from functools import partial
-import torch
-import torch_sparse
-import torch.multiprocessing as multiprocessing
 
 import scipy.sparse
 
@@ -46,6 +44,7 @@ from localmd.tiff_loader import tiff_loader
 import time
 import datetime
 import sys
+import pdb
 
 
 def display(msg):
@@ -367,61 +366,64 @@ def get_projector(U):
     return (final_matrix_r_sparse.T, theta)
 
 
+#Once Jax has better support for fused sparse-dense matrix operations, can merge the below two functions into one "jitted" function
+def eigenvalue_and_eigenvec_routine(Sigma):
+    
+    eig_vals, eig_vecs = jnp.linalg.eigh(Sigma)  # Note: eig vals/vecs ascending
+    eig_vals = np.array(eig_vals)
+    eig_vecs = np.array(eig_vecs)
+    eig_vecs = np.flip(eig_vecs, axis=(1,))
+    eig_vals = np.flip(eig_vals, axis=(0,))
+    
+    return eig_vecs, eig_vals
 
- 
-def factored_svd(spatial_components, temporal_components, device='cpu', factor=1):
+def compute_sigma(spatial_components, Lt):
     '''
-    Given a matrix factorization M=UQ (with U sparse) factorizes Q = RSVt so
-    that [UR]SVt is the SVD of M.
+    Note: Lt here refers to the upper triangular matrix from the QR factorization of V ("temporal_components"). So 
+    temporal_components.T = Qt.dot(Lt), which means that 
+    UV = U(Lt.T)(Qt.T)
+    '''
+    Lt = np.array(Lt)
+    UtU = spatial_components.T.dot(spatial_components)
+    UtUL = UtU.dot(Lt.T)
+    Sigma = Lt.dot(UtUL)
     
-    KEY: The product, spatial_components * temporal_components, should be a matrix whose rows have mean 0. 
-    This is important because when we produce the factorized SVD, we can then do another round of PCA-like dimensionality reduction (the singular values of this SVD directly gives us the eigenvalues of the correlation matrix)
-    
-    KEY: Everything needs to be float64 for numerical stability 
-    
+    return Sigma
+
+
+def factored_svd(spatial_components, temporal_components, factor = 0.25):
+    '''
+    This is a fast method to convert a low-rank decomposition (spatial_components * temporal_components) into a 
     Inputs: 
-        spatial_components: scipy.sparse matrix
-        temporal_components: np.ndarray
-        
-    Note: float is significantly (i.e. 1 order of magnitude) faster here, that should be the default input
+        spatial_components: scipy.sparse.coo_matrix. Shape (d, R)
+        temporal_components: jax.numpy. Shape (R, T)
     '''
-    spatial_components_sparse = torch_sparse.tensor.from_scipy(spatial_components).to(device).double()
-    temporal_components_torch = torch.from_numpy(temporal_components).to(device).double()
-    Qt, Lt = torch.linalg.qr(temporal_components_torch.t(), mode='reduced')
-    # Step 2: Fast Transformed Spatial Inner Product Sigma = L'U'UL
-    Sigma = torch_sparse.matmul(spatial_components_sparse.t(), spatial_components_sparse).to_dense()
-    Sigma = torch.matmul(Lt, torch.matmul(Sigma, Lt.t()))
-    Sigma = (Sigma + Sigma.t()) / 2 #Trick to enforce symmetry of the matrix (so that next step works as intended, independent of rounding errors from above) 
+    Qt, Lt=  jnp.linalg.qr(temporal_components.transpose(), mode='reduced')
+    Sigma = compute_sigma(spatial_components, Lt)
+    eig_vecs, eig_vals = eigenvalue_and_eigenvec_routine(Sigma)
+    Qt = np.array(Qt)
+    Lt = np.array(Lt)
     
-    eig_vals, eig_vecs = torch.linalg.eigh(Sigma)  # Note: eig vals/vecs ascending
-    eig_vecs = torch.flip(eig_vecs, dims=(1,))
-    eig_vals = torch.flip(eig_vals, dims=(0,))
+    eig_vec_norms = np.linalg.norm(eig_vecs, axis = 0)
+    selected_indices = eig_vals > 0
+    eig_vecs = eig_vecs[:, selected_indices]
+    eig_vals = eig_vals[selected_indices]
+    singular_values = np.sqrt(eig_vals)
     
-    eig_vec_norms = torch.linalg.norm(eig_vecs, dim=0)
-    selected_indices = torch.nonzero((eig_vec_norms > 0) * (eig_vals > 0)).squeeze()
-    
-    eig_vecs = torch.index_select(eig_vecs, 1, selected_indices)
-    eig_vals = torch.index_select(eig_vals, 0, selected_indices) 
-    
-    singular_values = torch.sqrt(eig_vals)  # Note: now vals descending
-    
-    # Step 4: Apply Eigen Vectors Such That (UR, V) Are Singular Vectors
-    mixing_weights = torch.matmul(Lt.t(), eig_vecs) / singular_values[None, :]
-    temporal_basis = torch.matmul(eig_vecs.t(), Qt.t())
+    mixing_weights = np.array(jnp.matmul(Lt.T, eig_vecs / singular_values[None, :]))
+    temporal_basis = np.array(jnp.matmul(eig_vecs.T, Qt.T))
     
     #Here we prune the factorized SVD 
-    return rank_prune_svd(mixing_weights, singular_values, temporal_basis, factor=factor)
+    return rank_prune_svd(mixing_weights, singular_values, temporal_basis, factor = factor)
+    
 
-
-def rank_prune_svd(mixing_weights, singular_values, temporal_basis, factor=0.25):
+def rank_prune_svd(mixing_weights, singular_values, temporal_basis, factor = 0.25):
     '''
     Inputs: 
-        mixing_weights: torch.Tensor, shape (R x R)
-        singular_values: torch.Tensor, shape (R)
-        temporal_basis: torch.Tensor, shape (R, T)
-        explained_variance: float between 0 and 1. The fraction of explained variance which we would like to explain. 
+        mixing_weights: numpy.ndarray, shape (R x R)
+        singular_values: numpy.ndarray, shape (R)
+        temporal_basis: numpy.ndarray, shape (R, T)
     '''
-    
     dimension = singular_values.shape[0]
     index = int(math.floor(factor * dimension))
     if index == 0:
@@ -434,14 +436,9 @@ def rank_prune_svd(mixing_weights, singular_values, temporal_basis, factor=0.25)
         temporal_basis = temporal_basis[:index, :]
     display("The rank was originally {} now it is {}".format(dimension, mixing_weights.shape[1]))
     return mixing_weights, singular_values, temporal_basis
-    
+
 
 def localmd_decomposition(filename, block_sizes, overlap, frame_range, max_components=50, background_rank=15, sim_conf=5, batching=10, tiff_batch_size = 10000, dtype='float32', order="F", num_workers=0, pixel_batch_size=5000, frame_corrector_obj = None, max_consec_failures = 1, rank_prune_factor=1):
-    
-    if torch.cuda.is_available():
-            device='cuda'
-    else:
-            device='cpu'
             
     load_obj = tiff_loader(filename, dtype=dtype, center=True, normalize=True, background_rank=background_rank, batch_size=tiff_batch_size, order=order, num_workers=num_workers, pixel_batch_size=pixel_batch_size, frame_corrector_obj = frame_corrector_obj)
     start = frame_range[0]
@@ -504,6 +501,8 @@ def localmd_decomposition(filename, block_sizes, overlap, frame_range, max_compo
         for j in dim_2_iters:
             pairs.append((k, j))
             subset = data[k:k+block_sizes[0], j:j+block_sizes[1], :].astype(dtype)
+            
+            ## Encapsulate this into a single function
             key = make_jax_random_key()
             spatial_comps, decisions, _ = single_block_md(subset, key, max_components, spatial_thres, temporal_thres, max_consec_failures)
 
@@ -513,6 +512,8 @@ def localmd_decomposition(filename, block_sizes, overlap, frame_range, max_compo
             
             decisions = np.array(decisions).flatten() > 0
             spatial_cropped = spatial_comps[:, :, decisions]
+            
+            ## End of encapsulate code
             
             #Weight the spatial components here
             spatial_cropped = spatial_cropped * block_weights[:, :, None]
@@ -546,8 +547,6 @@ def localmd_decomposition(filename, block_sizes, overlap, frame_range, max_compo
     
     display("The total number of identified components before pruning is {}".format(U_r.shape[1]))
     
-    
-    
     display("Computing projector for sparse regression step")
     projector = get_projector(U_r)
 
@@ -559,16 +558,24 @@ def localmd_decomposition(filename, block_sizes, overlap, frame_range, max_compo
     display("Aggregating Global SVD with localMD results")
     U_r, V = aggregate_decomposition(U_r, V, load_obj)
     
+    #Extract necessary info from the loader object and delete it. This frees up space on GPU for the below linalg.eigh computations
+    std_img = load_obj.std_img
+    mean_img = load_obj.mean_img
+    order = load_obj.order
+    shape = load_obj.shape
+    del load_obj
+    jax.clear_backends()
+    
     U_r = U_r.astype(dtype)
     V = V.astype(dtype)
 
     ## Step 2h: Do a SVD Reformat given U and V
     display("Running QR decomposition on V")
-    R, s, Vt = factored_svd(U_r, V, device='cpu', factor = rank_prune_factor)
+    R, s, Vt = factored_svd(U_r, V, factor = rank_prune_factor)
 
     display("Matrix decomposition completed")
 
-    return U_r, R.cpu().numpy(), s.cpu().numpy(), Vt.cpu().numpy(), load_obj
+    return U_r, R, s, Vt, std_img, mean_img, shape, order#, load_obj
 
 
 def aggregate_decomposition(U_r, V, load_obj):
