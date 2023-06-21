@@ -313,12 +313,14 @@ def single_block_md(block, key, max_rank, spatial_thres, temporal_thres, max_con
     '''
     Matrix Decomposition function for all blocks. 
     Inputs: 
-        block: jnp.array. Dimensions (block_1, block_2, T). (block_1, block_2) are the dimensions of this patch of data, T is the number of frames. We assume that this data has already been centered and noise-normalized
-        projection_data: jnp.array. Dimensions (T, max_dimension). Used for the fast approximate SVD method.
+        - block: jnp.array. Dimensions (block_1, block_2, T). (block_1, block_2) are the dimensions of this patch of data, T is the number of frames. We assume that this data has already been centered and noise-normalized
+        - key: jax random number key. 
+        - max_rank: int. Maximum rank of the low-rank decomposition which we permit over this block. 
+        - spatial_thres. float. We compute a spatial roughness statistic for each spatial component to determine whether it is noise or smoother signal. This is the threshold for that test. 
+        - temporal_thres. float. We compute a temporal roughness statistic for each temporal component to determine whether it is noise or smoother signal. This is the threshold for that test. 
+        - max_consec_failures. After running the truncated SVD on this data, we look at each pair of rank-1 components (spatial, temporal) in order of significance (singular values). Once the hypothesis test fails a certain number of times on this data, we discard all subsequent components from the decomposition. 
         
     '''
-    #TODO: Get rid of max consec failures entirely from function API 
-    # block = standardize_block(block) #Center and divide by noise standard deviation before doing matrix decomposition
     d1, d2, T = block.shape
     block_2d = jnp.reshape(block, (d1*d2, T), order="F")
     
@@ -334,6 +336,91 @@ def single_block_md(block, key, max_rank, spatial_thres, temporal_thres, max_con
     
     return u_mat, good_comps, v_mat
 
+@partial(jit, static_argnums=(3,))
+def single_residual_block_md(block, existing, key, max_rank, spatial_thres, temporal_thres, max_consec_failures):
+    '''
+    Matrix Decomposition function for all blocks. 
+    Inputs: 
+        - block: jnp.array. Dimensions (block_1, block_2, T). (block_1, block_2) are the dimensions of this patch of data, T is the number of frames. We assume that this data has already been centered and noise-normalized
+        - existing: jnp.array. Dimensions (block_1, block_2, T). (block_1, block_2) are the dimensions of this patch of data, T is the number of frames. This is an orthonormal spatial basis set which has already been identified for this spatial block of the FOV. We subtract it from "block" (via linear subspace projection) and THEN run the truncated SVD. The goal here is to find neural signal from "block" which is not already identified by "existing". 
+        - key: jax random number key. 
+        - max_rank: int. Maximum rank of the low-rank decomposition which we permit over this block. 
+        - spatial_thres. float. We compute a spatial roughness statistic for each spatial component to determine whether it is noise or smoother signal. This is the threshold for that test. 
+        - temporal_thres. float. We compute a temporal roughness statistic for each temporal component to determine whether it is noise or smoother signal. This is the threshold for that test. 
+        - max_consec_failures. After running the truncated SVD on this data, we look at each pair of rank-1 components (spatial, temporal) in order of significance (singular values). Once the hypothesis test fails a certain number of times on this data, we discard all subsequent components from the decomposition. 
+    '''
+    d1, d2, T = block.shape
+    net_comps = existing.shape[2]
+    block_2d = jnp.reshape(block, (d1*d2, T), order="F")
+    existing_2d = jnp.reshape(existing, (d1*d2, net_comps), order="F")
+    
+    projection = jnp.matmul(existing_2d, jnp.matmul(existing_2d.transpose(), block_2d))
+    block_2d = block_2d - projection
+    
+    
+    decomposition = truncated_random_svd(block_2d, key, max_rank)
+    u_mat, v_mat = decomposition[0], decomposition[1]
+    u_mat = jnp.reshape(u_mat, (d1, d2, u_mat.shape[1]), order="F")
+
+    
+    # Now we begin the evaluation phase
+    good_comps = construct_final_fitness_decision(u_mat, v_mat.T, spatial_thres,\
+                                                  temporal_thres, max_consec_failures)
+    
+    return u_mat, good_comps, v_mat
+
+
+def windowed_pmd(window_length, block, max_rank, spatial_thres, temporal_thres, max_consec_failures):
+    '''
+    Implementation of windowed blockwise decomposition. Given a block of the movie (d1, d2, T), we break the movie into smaller chunks. 
+    (say (d1, d2, R) where R < T), and run the truncated SVD decomposition iteratively on these blocks. This helps (1) avoid rank blowup and
+    (2) make sure our spatial fit 
+    
+    Inputs: 
+        - window_length: int. We break up the block into temporal subsets of this length and do the blockwise SVD decomposition on these blocks
+        - block: np.ndarray. Shape (d1, d2, T)
+        - max_rank: We break up "block" into temporal segments of length "window_length", and we run truncated SVD on each of these subsets iteratively. max_rank is the max rank of the decomposition we can obtain from any one of these individual blocks
+        - spatial_thres: float. See single_block_md for docs
+        - temporal_thres. float. See single_block_md for docs
+        - max_consec_failures: int.  See single_block_md for docs
+    '''
+    d1, d2 = (block.shape[0], block.shape[1])
+    window_range = block.shape[2]
+    assert window_length <= window_range
+    start_points = list(range(0, window_range, window_length))
+    if start_points[-1] > window_range - window_length:
+        start_points[-1] = window_range - window_length
+    
+    final_decomposition = np.zeros((d1, d2, 0))
+    remaining_components = max_rank
+    for k in start_points:
+        start_value = k
+        end_value = start_value + window_length
+        
+        key = make_jax_random_key()
+        if k == 0 or final_decomposition.shape[2] == 0:
+            subset = block[:, :, start_value:end_value]
+            spatial_comps, decisions, _ = single_block_md(subset, key, remaining_components, spatial_thres, temporal_thres, max_consec_failures)
+            spatial_comps = np.array(spatial_comps)
+            decisions = np.array(decisions).flatten() > 0
+            spatial_cropped = spatial_comps[:, :, decisions]
+        else:
+            subset = block[:, :, start_value:end_value]
+            spatial_comps, decisions, _ = single_residual_block_md(subset, final_decomposition, key, remaining_components, spatial_thres, temporal_thres, max_consec_failures)
+            spatial_comps = np.array(spatial_comps)
+            decisions = np.array(decisions).flatten() > 0
+            spatial_cropped = spatial_comps[:, :, decisions]
+        
+        final_decomposition = np.concatenate([final_decomposition, spatial_cropped], axis=2)
+        if final_decomposition.shape[2] == max_rank: 
+            break
+        else:
+            remaining_components = max_rank - final_decomposition.shape[2]
+        
+        
+    print("final shape is {}".format(final_decomposition.shape))
+    return final_decomposition
+    
 
 def append_decomposition_results(curr_results, new_results):
     '''
@@ -438,19 +525,20 @@ def rank_prune_svd(mixing_weights, singular_values, temporal_basis, factor = 0.2
     return mixing_weights, singular_values, temporal_basis
 
 
-def localmd_decomposition(filename, block_sizes, overlap, frame_range, max_components=50, background_rank=15, sim_conf=5, batching=10, tiff_batch_size = 10000, dtype='float32', order="F", num_workers=0, pixel_batch_size=5000, frame_corrector_obj = None, max_consec_failures = 1, rank_prune_factor=1):
+def localmd_decomposition(filename, block_sizes, overlap, frame_range, window_length, max_components=50, background_rank=15, sim_conf=5, batching=10, tiff_batch_size = 10000, dtype='float32', order="F", num_workers=0, pixel_batch_size=5000, frame_corrector_obj = None, max_consec_failures = 1, rank_prune_factor=1):
             
     load_obj = tiff_loader(filename, dtype=dtype, center=True, normalize=True, background_rank=background_rank, batch_size=tiff_batch_size, order=order, num_workers=num_workers, pixel_batch_size=pixel_batch_size, frame_corrector_obj = frame_corrector_obj)
     start = frame_range[0]
     end = frame_range[1]
     end = min(end, load_obj.shape[2])
     frames = [i for i in range(start, end)]
+    assert end - start >= window_length and window_length > 0, "Window length needs to be nonneg and at most the range of frames in spatial fit"
     block_sizes = block_sizes
     overlap = overlap
     
     ##Step 2a: Get the spatial and temporal thresholds
-    display("Running Simulations")
-    spatial_thres, temporal_thres = threshold_heuristic([block_sizes[0], block_sizes[1], len(frames)], num_comps = 1, iters=250, percentile_threshold=sim_conf)
+    display("Running Simulations, block dimensions are {} x {} x {} ".format(block_sizes[0], block_sizes[1], window_length))
+    spatial_thres, temporal_thres = threshold_heuristic([block_sizes[0], block_sizes[1], window_length], num_comps = 1, iters=250, percentile_threshold=sim_conf)
     
     ##Step 2b: Load the data you will do blockwise SVD on
     display("Loading Data")
@@ -503,15 +591,18 @@ def localmd_decomposition(filename, block_sizes, overlap, frame_range, max_compo
             subset = data[k:k+block_sizes[0], j:j+block_sizes[1], :].astype(dtype)
             
             ## Encapsulate this into a single function
-            key = make_jax_random_key()
-            spatial_comps, decisions, _ = single_block_md(subset, key, max_components, spatial_thres, temporal_thres, max_consec_failures)
-
-            spatial_comps = np.array(spatial_comps).astype(dtype)
-            dim_1_val = k
-            dim_2_val = j
             
-            decisions = np.array(decisions).flatten() > 0
-            spatial_cropped = spatial_comps[:, :, decisions]
+            spatial_cropped = windowed_pmd(window_length, subset, max_components, spatial_thres, temporal_thres, max_consec_failures)
+            
+#             key = make_jax_random_key()
+#             spatial_comps, decisions, _ = single_block_md(subset, key, max_components, spatial_thres, temporal_thres, max_consec_failures)
+
+#             spatial_comps = np.array(spatial_comps).astype(dtype)
+#             dim_1_val = k
+#             dim_2_val = j
+            
+#             decisions = np.array(decisions).flatten() > 0
+#             spatial_cropped = spatial_comps[:, :, decisions]
             
             ## End of encapsulate code
             
