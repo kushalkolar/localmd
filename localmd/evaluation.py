@@ -14,8 +14,6 @@ from functools import partial
 
 import numpy as np
 
-
-
 #@partial(jit)
 def l1_norm(data):
     '''
@@ -176,11 +174,32 @@ def evaluate_fitness(img, trace, spatial_thres, temporal_thres):
 evaluate_fitness_vmap = vmap(evaluate_fitness, in_axes=(2, 1, None, None))
 
 #@partial(jit)
-def construct_final_fitness_decision(imgs, traces, spatial_thres, temporal_thres, max_consec_failures):
+def construct_final_fitness_decision(imgs, traces, spatial_thres, temporal_thres):
     output = evaluate_fitness_vmap(imgs, traces, spatial_thres, temporal_thres)
     
-    final_output = successive_filter(output, max_consec_failures)
-    return final_output
+    # final_output = successive_filter(output, max_consec_failures)
+    return output
+
+def filter_by_failures(decisions, max_consecutive_failures):
+    '''
+    Input: 
+        - decisions: 1-dimensional np.ndarray. Boolean values.
+    Ouput: 
+        - decisions_filtered: same shape/types a decisionos. 
+    '''
+    number_of_failures = 0
+    all_fails = False
+    for k in range(decisions.shape[0]):
+        if all_fails:
+            decisions[k] = False
+        elif not decisions[k]:
+            number_of_failures += 1
+            if number_of_failures == max_consecutive_failures:
+                all_fails = True
+        else:
+            number_of_failures = 0
+    return decisions
+            
 
 #@partial(jit)
 def successive_filter(my_list, max_consec_failures):
