@@ -55,125 +55,6 @@ def display(msg):
     sys.stdout.write(tag + msg + '\n')
     sys.stdout.flush()
 
-
-@partial(jit)
-def objective_function(X, placeholder, data):
-    num_rows = data.shape[0]
-    difference = data.shape[1]
-
-    comp1 = jax.lax.dynamic_slice(X, (0, 0), (num_rows, X.shape[1]))
-    comp2 = jax.lax.dynamic_slice(X, (num_rows, 0), (difference, X.shape[1]))
-    prod = jnp.matmul(comp1, comp2.T)
-    return jnp.linalg.norm(data - prod)
-
-#Some observations here: the projected gradient step is significantly slower than unconstrained gradient 
-# and it not necessary for us to actually use 
-@partial(jit)
-def rank_k_fit(data, orig_placeholder):
-
-    shape_1 = data.shape[0]
-    shape_2 = data.shape[1]
-    init_param = jnp.zeros((shape_1 + shape_2, orig_placeholder.shape[0])) + 1
-    solver = ProjectedGradient(fun=objective_function,
-                             projection=projection.projection_non_negative,
-                             tol=1e-6, maxiter=1000)
-    fit_val = solver.run(init_param, placeholder=orig_placeholder, data=data).params
-
-    return fit_val
-
-
-rank_k_fit_vmap = jit(vmap(rank_k_fit, in_axes=(2, None)))
-
-
-
-@partial(jit)
-def unconstrained_rank_fit(data, orig_placeholder):
-
-    shape_1 = data.shape[0]
-    shape_2 = data.shape[1]
-    init_param = jnp.zeros((shape_1 + shape_2, orig_placeholder.shape[0])) + 1
-
-    solver = jaxopt.GradientDescent(fun=objective_function, maxiter=1000)
-    params, state = solver.run(init_param, placeholder=orig_placeholder, data=data)
-
-    return params
-
-@partial(jit)
-def add_ith_column(mat, vector, i):
-    '''
-    Jit-able function for adding a vector to a specific column of a matrix (i-th column)
-    Inputs: 
-        mat: jnp.array, size (d, T)
-        vector: jnp.array, size (1, T)
-        i: integer between 0 and T-1 inclusive. Denotes which column of mat you'd like to add "vector" to
-        
-    Returns: 
-        mat: jnp.array, size (d, T). 
-    '''
-    col_range = jnp.arange(mat.shape[1])
-    col_filter = col_range == i
-    col_filter = jnp.expand_dims(col_filter, axis=0)
-    
-    dummy_mat = jnp.zeros_like(mat)
-    dummy_mat = dummy_mat + vector 
-    dummy_mat = dummy_mat * col_filter
-    mat = mat + dummy_mat
-    
-    return mat
-    
-    
-@partial(jit)
-def rank_1_deflation_pytree(i, input_pytree):
-    '''
-    Computes a rank-1 decomposition of residual and appends the results to u and v
-    Inputs:
-        i: integer indicating which column of our existing data to update with our rank-1 decomposition
-            (this is clarified below, look at the parameter definitions for u and v)
-        input_pytree. a list python object containing the following jnp.arrays (in order):
-            residual: jnp.array. Shape (d, T)
-            u: jnp.array. Shape (d, K) for some K that is not relevant to this functionality. We append the column vector of
-            our rank-1 decomposition to column k of u.
-            v: jnp.array. Shape (K, T). We append the row vector of
-                our rank-1 decomposition to row k of v.
-            
-    Outputs:
-        cumulative_results. Pytree (python list) containing (residual, u, v), where the residual has been updated
-            (i.e. we subtracted the rank-1 estimate from this procedure) and u and v have been updated as well 
-                (i.e. we append the rank-1 estimate from this procedure to the i-th column/row of u/v respectively).
-
-    
-    '''
-    residual = input_pytree[0]
-    u = input_pytree[1]
-    v = input_pytree[2]
-    
-    #Step 1: Get a rank-1 fit for the data
-    placeholder = jnp.zeros((1, 1))
-    approximation = unconstrained_rank_fit(residual, placeholder) #Output here will be (d + T, 1)-shaped jnp array
-    u_k = jax.lax.dynamic_slice(approximation, (0,0), (residual.shape[0], 1))
-    v_k = jax.lax.dynamic_slice(approximation, (residual.shape[0], 0), (residual.shape[1], 1))
-    
-    # v_k = jnp.dot(residual.T, u_k) #This is the debias/rescaling step
-    
-    new_residual = residual - jnp.dot(u_k, v_k.T)
-    
-    u_new = add_ith_column(u, u_k, i)
-    v_new = add_ith_column(v.T, v_k, i).T
-    
-    return [new_residual, u_new, v_new]    
-    
-@partial(jit)
-def iterative_rank_1_approx(test_data):
-    num_iters = 25
-    u_mat = jnp.zeros((test_data.shape[0], num_iters))
-    v_mat = jnp.zeros((num_iters, test_data.shape[1]))
-    i = 0
-    data_pytree = [test_data, u_mat, v_mat]
-    final_pytree = jax.lax.fori_loop(0, num_iters, rank_1_deflation_pytree, data_pytree)
-    
-    return final_pytree
-
-
 @partial(jit)
 def truncated_random_svd(input_matrix, key, rank_placeholder):
     '''
@@ -202,21 +83,6 @@ def truncated_random_svd(input_matrix, key, rank_placeholder):
     U_truncated = jax.lax.dynamic_slice(U_final, (0, 0), (U_final.shape[0], rank))
     V_truncated = jax.lax.dynamic_slice(V, (0, 0), (rank, V.shape[1]))
     return [U_truncated, V_truncated]
-
-
-
-
-@partial(jit)
-def iterative_rank_1_approx_sims(test_data):
-    num_iters = 3
-    u_mat = jnp.zeros((test_data.shape[0], num_iters))
-    v_mat = jnp.zeros((num_iters, test_data.shape[1]))
-    i = 0
-    data_pytree = [test_data, u_mat, v_mat]
-    final_pytree = jax.lax.fori_loop(0, num_iters, rank_1_deflation_pytree, data_pytree)
-    
-    return final_pytree
-
 
 
 @partial(jit)
@@ -281,10 +147,6 @@ def filter_and_decompose(block,mean_img, std_img,spatial_basis, projection_data,
     ##Step 1: Standardize the data
     block -= mean_img[:, :, None]
     block /= std_img[:, :, None]
-    
-    #Step 2: Get the temporal basis for the full FOV decomposition: 
-    # temporal_basis = jnp.tensordot(jnp.transpose(spatial_basis, axes=(2,0,1)), block, axes=((1,2), (0,1)))
-    # block = block - jnp.tensordot(spatial_basis, temporal_basis, axes=((2), (0)))
     
     return single_block_md(block, projection_data, spatial_thres, temporal_thres, max_consec_failures)
     
@@ -406,10 +268,9 @@ def windowed_pmd(window_length, block, max_rank, spatial_thres, temporal_thres, 
         if component_counter == max_rank: 
             break
         else:
-            remaining_components = max_rank - component_counter#final_decomposition.shape[2]
+            remaining_components = max_rank - component_counter
         
     final_decomposition = final_decomposition[:, :, :component_counter]
-    print("final shape is {}".format(final_decomposition.shape))
     return final_decomposition
     
 
@@ -581,21 +442,7 @@ def localmd_decomposition(filename, block_sizes, overlap, frame_range, window_le
             pairs.append((k, j))
             subset = data[k:k+block_sizes[0], j:j+block_sizes[1], :].astype(dtype)
             
-            ## Encapsulate this into a single function
-            
             spatial_cropped = windowed_pmd(window_length, subset, max_components, spatial_thres, temporal_thres, max_consec_failures)
-            
-#             key = make_jax_random_key()
-#             spatial_comps, decisions, _ = single_block_md(subset, key, max_components, spatial_thres, temporal_thres, max_consec_failures)
-
-#             spatial_comps = np.array(spatial_comps).astype(dtype)
-#             dim_1_val = k
-#             dim_2_val = j
-            
-#             decisions = np.array(decisions).flatten() > 0
-#             spatial_cropped = spatial_comps[:, :, decisions]
-            
-            ## End of encapsulate code
             
             #Weight the spatial components here
             spatial_cropped = spatial_cropped * block_weights[:, :, None]
