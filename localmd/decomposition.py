@@ -210,6 +210,23 @@ def single_residual_block_md(block, existing, key, rank_placeholder, spatial_thr
     return u_mat, good_comps, v_mat
 
 
+@partial(jit)
+def get_temporal_projector(final_spatial_decomposition, block):
+    '''
+    Inputs: 
+        final_spatial_decomposition. jnp.array. Shape (d1, d2, R), R is the rank. All columns orthonormal
+        block: jnp.array. Shape (d1, d2, T), T is number of frames in data which we fit for PMD
+
+    Returns: 
+        temporal_decomposition: jnp.array. Shape (R, T). Projection of block onto spatial basis
+    '''
+    d1, d2, R = final_spatial_decomposition.shape
+    T = block.shape[2]
+    final_spatial_decomposition_r = jnp.reshape(final_spatial_decomposition, (d1*d2, R), order="F")
+    block_r = jnp.reshape(block, (d1*d2, T), order="F")
+    temporal_decomposition = jnp.matmul(final_spatial_decomposition_r.transpose(), block_r)
+    return temporal_decomposition
+
 def windowed_pmd(window_length, block, max_rank, spatial_thres, temporal_thres, max_consec_failures):
     '''
     Implementation of windowed blockwise decomposition. Given a block of the movie (d1, d2, T), we break the movie into smaller chunks. 
@@ -223,6 +240,10 @@ def windowed_pmd(window_length, block, max_rank, spatial_thres, temporal_thres, 
         - spatial_thres: float. See single_block_md for docs
         - temporal_thres. float. See single_block_md for docs
         - max_consec_failures: int. After running the truncated SVD on this data, we look at each pair of rank-1 components (spatial, temporal) in order of significance (singular values). Once the hypothesis test fails a certain number of times on this data, we discard all subsequent components from the decomposition. 
+    Returns: 
+        - final_spatial_decomposition: np.ndarray. Shape (d1, d2, num_comps); this describes the spatial comps
+        - final_temporal_decomposition: np.ndarray. Shape (num_comps, T); this describes the corresponding temporal comps
+        Key: np.tensordot(final_spatial_decomposition, final_tempooral_decomposition, axes=(2,0)) should give the decomposition of the original data. 
     '''
     d1, d2 = (block.shape[0], block.shape[1])
     window_range = block.shape[2]
@@ -231,47 +252,45 @@ def windowed_pmd(window_length, block, max_rank, spatial_thres, temporal_thres, 
     if start_points[-1] > window_range - window_length:
         start_points[-1] = window_range - window_length
     
-    final_decomposition = np.zeros((d1, d2, max_rank))
+    final_spatial_decomposition = np.zeros((d1, d2, max_rank))
     remaining_components = max_rank
     
     component_counter = 0
-    rank_placeholder_list = [np.zeros((max_rank,)) for i in range(0, max_rank+1)]
+    rank_placeholder = np.zeros((max_rank,))
     
     for k in start_points:
         start_value = k
         end_value = start_value + window_length
         
         key = make_jax_random_key()
-        if k == 0 or final_decomposition.shape[2] == 0:
+        if k == 0 or component_counter == 0:
             subset = block[:, :, start_value:end_value]
-            rank_placeholder = rank_placeholder_list[remaining_components]
             spatial_comps, decisions, _ = single_block_md(subset, key, rank_placeholder, spatial_thres, temporal_thres)
-            spatial_comps = np.array(spatial_comps)
-            decisions = np.array(decisions).flatten() > 0
-            decisions = filter_by_failures(decisions, max_consec_failures)
-            spatial_cropped = spatial_comps[:, :, decisions]
-            final_filter_index = min(spatial_cropped.shape[2], remaining_components)
-            spatial_cropped = spatial_cropped[:, :, :final_filter_index]
         else:
             subset = block[:, :, start_value:end_value]
-            rank_placeholder = rank_placeholder_list[remaining_components]
-            spatial_comps, decisions, _ = single_residual_block_md(subset, final_decomposition, key, rank_placeholder, spatial_thres, temporal_thres)
-            spatial_comps = np.array(spatial_comps)
-            decisions = np.array(decisions).flatten() > 0
-            decisions = filter_by_failures(decisions, max_consec_failures)
-            spatial_cropped = spatial_comps[:, :, decisions]
-            final_filter_index = min(spatial_cropped.shape[2], remaining_components)
-            spatial_cropped = spatial_cropped[:, :, :final_filter_index]
+            spatial_comps, decisions, _ = single_residual_block_md(subset, final_spatial_decomposition, key, rank_placeholder, spatial_thres, temporal_thres)
         
-        final_decomposition[:, :, component_counter:component_counter + spatial_cropped.shape[2]] = spatial_cropped
+        spatial_comps = np.array(spatial_comps)
+        decisions = np.array(decisions).flatten() > 0
+        decisions = filter_by_failures(decisions, max_consec_failures)
+        spatial_cropped = spatial_comps[:, :, decisions]
+        final_filter_index = min(spatial_cropped.shape[2], remaining_components)
+        spatial_cropped = spatial_cropped[:, :, :final_filter_index]
+        
+        final_spatial_decomposition[:, :, component_counter:component_counter + spatial_cropped.shape[2]] = spatial_cropped
         component_counter += spatial_cropped.shape[2]
         if component_counter == max_rank: 
             break
         else:
             remaining_components = max_rank - component_counter
-        
-    final_decomposition = final_decomposition[:, :, :component_counter]
-    return final_decomposition
+    
+    #Run this first so that the jitted code can be reused across function calls (avoids recompilation...)
+    final_temporal_decomposition = np.array(get_temporal_projector(final_spatial_decomposition, block))
+    
+    final_spatial_decomposition = final_spatial_decomposition[:, :, :component_counter]
+    final_temporal_decomposition = final_temporal_decomposition[:component_counter, :]
+
+    return final_spatial_decomposition, final_temporal_decomposition
     
 
 def append_decomposition_results(curr_results, new_results):
@@ -288,21 +307,21 @@ def append_decomposition_results(curr_results, new_results):
     return curr_results
 
 
-def get_projector(U):
-    '''
-    Input: 
-        U: matrix of dimensions (d, R) where d is number of pixels, R is number of frames
-    Returns: 
-    Tuple (final_matrix_r_sparse, projector)
-        final_matrix_r_sparse: a sparse version of U. Type scipy.sparse
-        projector: the inverse term used to do a linear subspace projection of a vector onto U. I.e.
+# def get_projector(U):
+#     '''
+#     Input: 
+#         U: matrix of dimensions (d, R) where d is number of pixels, R is number of frames
+#     Returns: 
+#     Tuple (final_matrix_r_sparse, projector)
+#         final_matrix_r_sparse: a sparse version of U. Type scipy.sparse
+#         projector: the inverse term used to do a linear subspace projection of a vector onto U. I.e.
         
-        Proj_U (X) = U (U^TU)-1 U^T X --> projector is (U^TU)^-1
-    '''
-    final_matrix_r_sparse = scipy.sparse.coo_matrix(U)
-    prod = (final_matrix_r_sparse.T.dot(final_matrix_r_sparse)).toarray()
-    theta = np.array(jnp.linalg.inv(prod))
-    return (final_matrix_r_sparse.T, theta)
+#         Proj_U (X) = U (U^TU)-1 U^T X --> projector is (U^TU)^-1
+#     '''
+#     final_matrix_r_sparse = scipy.sparse.coo_matrix(U)
+#     prod = (final_matrix_r_sparse.T.dot(final_matrix_r_sparse)).toarray()
+#     theta = np.array(jnp.linalg.inv(prod))
+#     return (final_matrix_r_sparse.T, theta)
 
 
 #Once Jax has better support for fused sparse-dense matrix operations, can merge the below two functions into one "jitted" function
@@ -330,31 +349,30 @@ def compute_sigma(spatial_components, Lt):
     return Sigma
 
 
-def factored_svd(spatial_components, temporal_components, factor = 0.25):
-    '''
-    This is a fast method to convert a low-rank decomposition (spatial_components * temporal_components) into a 
-    Inputs: 
-        spatial_components: scipy.sparse.coo_matrix. Shape (d, R)
-        temporal_components: jax.numpy. Shape (R, T)
-    '''
-    Qt, Lt=  jnp.linalg.qr(temporal_components.transpose(), mode='reduced')
-    Sigma = compute_sigma(spatial_components, Lt)
-    eig_vecs, eig_vals = eigenvalue_and_eigenvec_routine(Sigma)
-    Qt = np.array(Qt)
-    Lt = np.array(Lt)
+# def factored_svd(spatial_components, temporal_components, factor = 0.25):
+#     '''
+#     This is a fast method to convert a low-rank decomposition (spatial_components * temporal_components) into a 
+#     Inputs: 
+#         spatial_components: scipy.sparse.coo_matrix. Shape (d, R)
+#         temporal_components: jax.numpy. Shape (R, T)
+#     '''
+#     Qt, Lt=  jnp.linalg.qr(temporal_components.transpose(), mode='reduced')
+#     Sigma = compute_sigma(spatial_components, Lt)
+#     eig_vecs, eig_vals = eigenvalue_and_eigenvec_routine(Sigma)
+#     Qt = np.array(Qt)
+#     Lt = np.array(Lt)
     
-    eig_vec_norms = np.linalg.norm(eig_vecs, axis = 0)
-    selected_indices = eig_vals > 0
-    eig_vecs = eig_vecs[:, selected_indices]
-    eig_vals = eig_vals[selected_indices]
-    singular_values = np.sqrt(eig_vals)
+#     eig_vec_norms = np.linalg.norm(eig_vecs, axis = 0)
+#     selected_indices = eig_vals > 0
+#     eig_vecs = eig_vecs[:, selected_indices]
+#     eig_vals = eig_vals[selected_indices]
+#     singular_values = np.sqrt(eig_vals)
     
-    mixing_weights = np.array(jnp.matmul(Lt.T, eig_vecs / singular_values[None, :]))
-    temporal_basis = np.array(jnp.matmul(eig_vecs.T, Qt.T))
+#     mixing_weights = np.array(jnp.matmul(Lt.T, eig_vecs / singular_values[None, :]))
+#     temporal_basis = np.array(jnp.matmul(eig_vecs.T, Qt.T))
     
-    #Here we prune the factorized SVD 
-    return rank_prune_svd(mixing_weights, singular_values, temporal_basis, factor = factor)
-    
+#     #Here we prune the factorized SVD 
+#     return rank_prune_svd(mixing_weights, singular_values, temporal_basis, factor = factor)
 
 def rank_prune_svd(mixing_weights, singular_values, temporal_basis, factor = 0.25):
     '''
@@ -397,7 +415,7 @@ def localmd_decomposition(filename, block_sizes, overlap, frame_range, window_le
     
     ##Step 2b: Load the data you will do blockwise SVD on
     display("Loading Data")
-    data = load_obj.temporal_crop_with_filter([i for i in range(start, end)])
+    data, temporal_basis_crop = load_obj.temporal_crop_with_filter([i for i in range(start, end)])
     data_std_img = load_obj.std_img #(d1, d2) shape
     data_mean_img = load_obj.mean_img #(d1, d2) shape
     data_spatial_basis = load_obj.spatial_basis.reshape((load_obj.shape[0], load_obj.shape[1], -1), order=load_obj.order)
@@ -439,13 +457,15 @@ def localmd_decomposition(filename, block_sizes, overlap, frame_range, window_le
     row_indices = []
     spatial_overall_values = []
     cumulative_weights = np.zeros((data.shape[0], data.shape[1]))
+    total_temporal_fit = []
     
     for k in dim_1_iters:
         for j in dim_2_iters:
             pairs.append((k, j))
             subset = data[k:k+block_sizes[0], j:j+block_sizes[1], :].astype(dtype)
             
-            spatial_cropped = windowed_pmd(window_length, subset, max_components, spatial_thres, temporal_thres, max_consec_failures)
+            spatial_cropped, temporal_cropped = windowed_pmd(window_length, subset, max_components, spatial_thres, temporal_thres, max_consec_failures)
+            total_temporal_fit.append(temporal_cropped)
             
             #Weight the spatial components here
             spatial_cropped = spatial_cropped * block_weights[:, :, None]
@@ -469,6 +489,7 @@ def localmd_decomposition(filename, block_sizes, overlap, frame_range, window_le
             
     
     U_r = scipy.sparse.coo_matrix((spatial_overall_values, (column_indices, row_indices)), shape=(data.shape[0]*data.shape[1], row_number))
+    V_cropped = np.concatenate(total_temporal_fit, axis = 0)
     
     display("Normalizing by weights")
     weight_normalization_diag = np.zeros((data.shape[0]*data.shape[1],))
@@ -477,18 +498,22 @@ def localmd_decomposition(filename, block_sizes, overlap, frame_range, window_le
         [(1 / weight_normalization_diag).ravel()], [0])
     U_r = normalizing_weights.dot(U_r)
     
+    #Insert function here to append the spatial and temporal background to U_r and V_cropped
+    U_r, V_cropped = aggregate_UV(U_r, V_cropped, load_obj.spatial_basis, temporal_basis_crop)
+    
     display("The total number of identified components before pruning is {}".format(U_r.shape[1]))
     
     display("Computing projector for sparse regression step")
-    projector = get_projector(U_r)
+    U_r, P = get_projector(U_r, V_cropped)
+    # projector = get_projector(U_r)
 
     ## Step 2f: Do sparse regression to get the V matrix: 
     display("Running sparse regression")
-    V = load_obj.V_projection(projector)
+    V = load_obj.V_projection([U_r.T, P.T])
 
     ## Step 2g: Aggregate the global SVD with the localMD results to create the final decomposition
-    display("Aggregating Global SVD with localMD results")
-    U_r, V = aggregate_decomposition(U_r, V, load_obj)
+    # display("Aggregating Global SVD with localMD results")
+    # U_r, V = aggregate_decomposition(U_r, V, load_obj)
     
     #Extract necessary info from the loader object and delete it. This frees up space on GPU for the below linalg.eigh computations
     std_img = load_obj.std_img
@@ -496,18 +521,93 @@ def localmd_decomposition(filename, block_sizes, overlap, frame_range, window_le
     order = load_obj.order
     shape = load_obj.shape
     del load_obj
-    jax.clear_backends()
+    # jax.clear_backends()
     
-    U_r = U_r.astype(dtype)
-    V = V.astype(dtype)
+#     U_r = U_r.astype(dtype)
+#     V = V.astype(dtype)
 
     ## Step 2h: Do a SVD Reformat given U and V
     display("Running QR decomposition on V")
-    R, s, Vt = factored_svd(U_r, V, factor = rank_prune_factor)
+    R, s, Vt = factored_svd(P, V)
+    R = np.array(R)
+    s = np.array(s)
+    Vt = np.array(Vt)
 
     display("Matrix decomposition completed")
 
     return U_r, R, s, Vt, std_img, mean_img, shape, order#, load_obj
+
+
+def aggregate_UV(U, V, spatial_basis, temporal_basis):
+    '''
+    Inputs: 
+        U: scipy.sparse.coo_matrix. Shape (d, R)
+        V: np.ndarray. Shape (R, T)
+        spatial_basis: np.ndarray. Shape (d, K) 
+        temporal_basis: np.ndarray. Shape (K, T)
+        
+    Output: 
+        U_net: scipy.sparse.coo_matrix. Shape (d, R + K)
+        V_net: np.ndarray. Shape (R + K, T)
+    
+    '''
+    spatial_bg_sparse = scipy.sparse.coo_matrix(spatial_basis)
+    U_net = scipy.sparse.hstack([U, spatial_bg_sparse])
+    
+    V_net = np.concatenate([V, temporal_basis], axis = 0)
+    return U_net, V_net
+
+
+def get_projector(U, V):
+    '''
+    This function uses random projection method described in Halko to find an orthonormal subspace which approximates the 
+    column span of UV. We want to express this subspace as a factorization: UP; this way we can keep the nice sparsity and avoid ever dealing with dense d x K (for any K) matrices (where d = number of pixels in movie). 
+    
+    Due to the overcomplete blockwise decomposition of PMD, we want to prune the rank of the PMD decomposition (U) by a factor of 4. We do this before regressing the entire movie onto the PMD object for memory and computational purposes (faster regression, more efficient GPU utilization). 
+    Input: 
+        U: scipy.sparse matrix of dimensions (d, R) where d is number of pixels, R is number of frames
+    Returns: 
+        Tuple (U, P) (described above)
+    '''
+    rank_prune_factor= 3.8
+    tol = 0.0001
+    keep_value = min(int(U.shape[1] / 4), V.shape[1])
+    
+    if int(U.shape[1] / 4) < V.shape[1]:
+        random_mat = np.random.randn(V.shape[1], int(U.shape[1]/rank_prune_factor))
+        random_mat = np.array(jnp.matmul(V, random_mat))
+    else:
+        random_mat = V
+    UtU = U.T.dot(U)
+    UtUR = UtU.dot(random_mat)
+    # RtUtUR = random_mat.T.dot(UtUR)
+    RtUtUR = np.array(jnp.matmul(random_mat.T, UtUR))
+    
+    eig_vals, eig_vecs = jnp.linalg.eigh(RtUtUR)
+    eig_vals = np.array(eig_vals)
+    eig_vecs = np.array(eig_vecs)
+    
+    eig_vecs = np.flip(eig_vecs, axis=(1,))
+    eig_vals = np.flip(eig_vals, axis=(0,))
+    
+    eig_vals = eig_vals[:keep_value]
+    eig_vecs = eig_vecs[:, :keep_value]
+    
+    #Now filter any remaining bad components
+    good_components = np.abs(eig_vals) > tol
+    eig_vals = eig_vals[good_components]
+    eig_vecs = eig_vecs[:, good_components]
+    
+    #Apply the eigenvectors to random_mat
+    # random_mat_e = random_mat.dot(eig_vecs)
+    random_mat_e = np.array(jnp.matmul(random_mat, eig_vecs))
+    singular_values = np.sqrt(eig_vals) 
+    
+    random_mat_e = random_mat_e / singular_values[None, :]
+    
+    return (U, random_mat_e)
+
+
 
 
 def aggregate_decomposition(U_r, V, load_obj):
@@ -522,3 +622,44 @@ def aggregate_decomposition(U_r, V, load_obj):
         V = np.concatenate([V, temporal_bg], axis = 0)
     
     return U_r, V
+
+
+def factored_svd(P, V):
+    d1, d2 = V.shape
+    if d1 <= d2: 
+        return left_smaller_svd_routine(P, V)
+    else:
+        return right_smaller_svd_routine(P, V)
+
+@partial(jit)
+def left_smaller_svd_routine(P, V):
+    '''
+    We compute the SVD of V using jax jittable functions. linalg.eigh is faster, so we want to use that. 
+    Assume here that V is d1 x d2, and d1 <= d2.
+    '''
+    VVt = jnp.matmul(V, V.transpose())
+    vals, Left = jnp.linalg.eigh(VVt)
+    singular = jnp.sqrt(vals)
+    divisor = jnp.where(singular == 0, 1, singular)
+    Right = jnp.divide(jnp.matmul(Left.transpose(), V), jnp.expand_dims(divisor, 1))
+    
+    PL = jnp.matmul(P, Left)
+    return PL, singular, Right
+    
+    
+@partial(jit)
+def right_smaller_svd_routine(V):
+    '''
+    We compute the SVD of V using jax jittable functions. linalg.eigh is faster, so we want to use that. 
+    Assume here that V is d1 x d2, and d1 > d2.
+    '''
+    VtV = jnp.matmul(V.transpose(), V)
+    vals, Right= jnp.linalg.eigh(VtV)
+    Right = Right.transpose()
+    singular = jnp.sqrt(vals)
+    divisor = jnp.where(singular == 0, 1, singular)
+    
+    Left = jnp.matmul(V, jnp.divide(Right.transpose(), jnp.expand_dims(divisor, axis=0)))
+    PL = jnp.matmul(P, Left)
+    
+    return PL, singular, Right

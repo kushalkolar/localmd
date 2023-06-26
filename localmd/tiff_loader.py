@@ -84,7 +84,6 @@ def truncated_random_svd(input_matrix, key, rank, num_oversamples=10):
     V_truncated = jax.lax.dynamic_slice(V, (0, 0), (rank, V.shape[1]))
     return [U_truncated, V_truncated]
 
-    
 
 def regular_collate(batch):
     return batch[0]
@@ -189,6 +188,7 @@ class tiff_loader():
             num_cpu = multiprocessing.cpu_count()
             num_workers = min(num_cpu - 1, len(self.tiff_dataobj))
             num_workers = max(num_workers, 0)
+        display("num workers for each dataloader is {}".format(num_workers))
 
         
         self.loader = torch.utils.data.DataLoader(self.tiff_dataobj, batch_size=1,
@@ -426,72 +426,68 @@ class tiff_loader():
         random_data = np.random.choice(sample_list,replace=False, size=min(n_samples, self.shape[2]))
         crop_data = self.temporal_crop_standardized(random_data)
         key = make_jax_random_key()
-        spatial_basis, _ = truncated_random_svd(crop_data.reshape((-1, crop_data.shape[-1])), key, self.background_rank)
+        spatial_basis, _ = truncated_random_svd(crop_data.reshape((-1, crop_data.shape[-1]), order=self.order), key, self.background_rank)
         return np.array(spatial_basis).astype(self.dtype)
             
-
     def V_projection(self, M):
-        '''
-        This function does two things, at a high level: 
-        (1) It projects the standardized data onto U (via multiplication by M)
-        (2) It calculates the temporal component from the full FOV SVD component as it does this
-        
-        Efficient batch matmul for sparse regression
-        Assumption: M has a small number of rows (and many columns). It is R x d, where R is the
-        rank of the decomposition and d is the number of pixels in the movie
-        Here we compute M(D - a_1a_2 - mean)/stdv. We break the computation into temporal subsets, so if the dataset is T frames, we compute this product T' frames at a time (where T' usually around 1 or 2K) 
-        R = Rank of PMD Decomposition
-        d = number of pixels in dataset
-        T = number of frames in dataset
-        T' = number of frames we load at a time in below for loop
-        p_r = rank of whole FOV SVD (self.spatial_basis.shape[1]). Typically very small, around 15
-        
-        
-        M: Projection matrix given as input: it is R x T'
-        D: The loaded dataset: dimensions d x T'
-        a1 = spatial basis (self.spatial_basis): dimensions d x p_r
-        a2 = temporal basis subset (calculation provided below): dimensions p_r x T'
-        mean = mean of data (from self.mean_image -- it is reshaped to d x 1 here
-        stdv = noise variance of data (from self.std_img -- it is reshaped to 1 x d here
-        
-        First: need to find a_2. To do so, compute: 
-        a1^T(D - mean)/stdv. Most efficient way: first find a1^TD, 
-        '''
-        sparse_projection_term = BCOO.from_scipy_sparse(M[0])
-        inv_term = M[1]
-        
-        result = np.zeros((inv_term.shape[0], self.shape[2]), dtype=self.dtype)
-        mean_img_r = self.mean_img.reshape((-1, 1), order=self.order)
-        std_img_r = self.std_img.reshape((-1, 1), order=self.order)
-        start = 0
-        temporal_basis = np.zeros((self.spatial_basis.shape[1], self.shape[2]), dtype=self.dtype)
-        
-        if self.frame_corrector is not None:
-            registration_method = self.frame_corrector.register_frames
-        else:
-            def return_identity(frames):
-                return frames
-            registration_method = return_identity
-        def full_V_projection_routine_jax(order, register_func, inv_term, sparse_project_term, data, spatial_basis, mean_img_r, std_img_r):
-            new_data = register_func(data)
-            return V_projection_routine_jax(self.order, inv_term, sparse_project_term, new_data, self.spatial_basis, mean_img_r, std_img_r)
+            '''
+            This function does two things, at a high level: 
+            (1) It projects the standardized data onto U (via multiplication by M)
+            (2) It calculates the temporal component from the full FOV SVD component as it does this
 
-        full_V_projection_routine = jit(full_V_projection_routine_jax, static_argnums=(0, 1))
-
-        start = 0
-        for i, data in enumerate(tqdm(self.loader_vanilla), 0):
-            temporal_basis_chunk, output = full_V_projection_routine(self.order, registration_method, inv_term,sparse_projection_term, data, self.spatial_basis, mean_img_r, std_img_r)
-            num_frames_chunk = output.shape[1]
-            
-            endpt = min(self.shape[2], start+num_frames_chunk)
-            result[:, start:endpt] = np.array(output).astype(self.dtype)
-            temporal_basis[:, start:endpt] = np.array(temporal_basis_chunk).astype(self.dtype)
-            start = endpt
+            Efficient batch matmul for sparse regression
+            Assumption: M has a small number of rows (and many columns). It is R x d, where R is the
+            rank of the decomposition and d is the number of pixels in the movie
+            Here we compute M(D - a_1a_2 - mean)/stdv. We break the computation into temporal subsets, so if the dataset is T frames, we compute this product T' frames at a time (where T' usually around 1 or 2K) 
+            R = Rank of PMD Decomposition
+            d = number of pixels in dataset
+            T = number of frames in dataset
+            T' = number of frames we load at a time in below for loop
+            p_r = rank of whole FOV SVD (self.spatial_basis.shape[1]). Typically very small, around 15
 
 
-        self.temporal_basis = temporal_basis
-        return result  
+            M: Projection matrix given as input: it is R x T'
+            D: The loaded dataset: dimensions d x T'
+            a1 = spatial basis (self.spatial_basis): dimensions d x p_r
+            a2 = temporal basis subset (calculation provided below): dimensions p_r x T'
+            mean = mean of data (from self.mean_image -- it is reshaped to d x 1 here
+            stdv = noise variance of data (from self.std_img -- it is reshaped to 1 x d here
 
+            First: need to find a_2. To do so, compute: 
+            a1^T(D - mean)/stdv. Most efficient way: first find a1^TD, 
+            '''
+            sparse_projection_term = BCOO.from_scipy_sparse(M[0])
+            inv_term = M[1]
+
+            result = np.zeros((inv_term.shape[0], self.shape[2]), dtype=self.dtype)
+            mean_img_r = self.mean_img.reshape((-1, 1), order=self.order)
+            std_img_r = self.std_img.reshape((-1, 1), order=self.order)
+            start = 0
+
+            if self.frame_corrector is not None:
+                registration_method = self.frame_corrector.register_frames
+            else:
+                def return_identity(frames):
+                    return frames
+                registration_method = return_identity
+            def full_V_projection_routine_jax(order, register_func, inv_term, sparse_project_term, data, mean_img_r, std_img_r):
+                new_data = register_func(data)
+                return V_projection_routine_jax(self.order, inv_term, sparse_project_term, new_data, mean_img_r, std_img_r)
+
+            full_V_projection_routine = jit(full_V_projection_routine_jax, static_argnums=(0, 1))
+
+            start = 0
+            result_list = []
+            for i, data in enumerate(tqdm(self.loader_vanilla), 0):
+                output = full_V_projection_routine(self.order, registration_method, inv_term, sparse_projection_term, data, mean_img_r, std_img_r)
+                num_frames_chunk = output.shape[1]
+
+                endpt = min(self.shape[2], start+num_frames_chunk)
+                result_list.append(output)
+                start = endpt
+            result = np.array(jnp.concatenate(result_list, axis = 1))
+
+            return result  
     
     ##TODO: Compose all operations so this pipeline executes end-to-end on accelerator
     def temporal_crop_with_filter(self, frames):
@@ -499,14 +495,19 @@ class tiff_loader():
         spatial_basis_r = self.spatial_basis.reshape((self.shape[0], self.shape[1], -1), order = self.order)
         
         output_matrix = np.zeros((crop_data.shape[0], crop_data.shape[1], crop_data.shape[2]))
+        temporal_basis = np.zeros((spatial_basis_r.shape[2], crop_data.shape[2]))
         num_iters = math.ceil(output_matrix.shape[2]/self.batch_size)
         start = 0
         for k in range(num_iters):
             end_pt = min(crop_data.shape[2], start + self.batch_size)
             crop_data_subset = crop_data[:, :, start:end_pt]
-            output_matrix[:, :, start:end_pt] = np.array(standardize_and_filter(crop_data_subset, self.mean_img, self.std_img, spatial_basis_r))
+            filter_data, temporal_basis_crop = standardize_and_filter(crop_data_subset, self.mean_img, self.std_img, spatial_basis_r)
+            filter_data = np.array(filter_data)
+            temporal_basis_crop = np.array(temporal_basis_crop)
+            output_matrix[:, :, start:end_pt] = filter_data
+            temporal_basis[:, start:end_pt] = temporal_basis_crop
             start += self.batch_size
-        return output_matrix
+        return output_matrix, temporal_basis
         
         
 
@@ -523,7 +524,7 @@ def standardize_and_filter(new_data, mean_img, std_img, spatial_basis):
     temporal_projection = jnp.matmul(spatial_basis.T, new_data) 
     new_data = new_data - jnp.matmul(spatial_basis, temporal_projection)
 
-    return jnp.reshape(new_data, (d1, d2, T), order="F")
+    return jnp.reshape(new_data, (d1, d2, T), order="F"), temporal_projection
                                        
 
 @partial(jit)
@@ -551,14 +552,17 @@ def get_temporal_basis_jax(D, spatial_basis, mean_img_r, std_img_r):
     
     return diff
 
-@partial(jit, static_argnums=(0))
-def V_projection_routine_jax(order, inv_term, M, D, spatial_basis, mean_img_r, std_img_r):
+# @partial(jit, static_argnums=(0))
+def V_projection_routine_jax(order, inv_term, M, D, mean_img_r, std_img_r):
     D = jnp.transpose(D, (1,2,0))
     D = jnp.reshape(D, (-1, D.shape[2]), order=order)
-    return V_projection_inner_loop(inv_term, M, D, spatial_basis, mean_img_r, std_img_r)
+    D = D - mean_img_r
+    D = D / std_img_r
+    output = V_projection_inner_loop(inv_term, M, D)
+    return output
 
-@sparse.sparsify
-def V_projection_inner_loop(inv_term, M, D, spatial_basis, mean_img_r, std_img_r):
+# @sparse.sparsify
+def V_projection_inner_loop(inv_term, M, D):
     '''
     Variables: 
         R: Current rank of decomposition 
@@ -568,23 +572,17 @@ def V_projection_inner_loop(inv_term, M, D, spatial_basis, mean_img_r, std_img_r
     Params: 
         - inv_term: shape (R, R)
         - M: shape (R, d)
-        - spatial_basis: shape (d, 1)
         - mean_img_r: shape (d, 1)
         - std_img_r: shape (d, 1)
         
     '''
-    M_std = M/std_img_r.transpose()
-    temporal_basis_chunk = get_temporal_basis_jax(D, spatial_basis, mean_img_r, std_img_r)
-    MD = jnp.matmul(M_std, D)
-    Ma1 = jnp.matmul(M, spatial_basis)
-    Ma1a2 = jnp.matmul(Ma1, temporal_basis_chunk)
-    M_mean = jnp.matmul(M_std, mean_img_r)
+    
+    # output = jnp.matmul(M, D)
+    output = M@D
+    output = inv_term@output
+    # output = jnp.matmul(inv_term, output)
 
-    output = MD - Ma1a2 - M_mean
-
-    output = jnp.dot(inv_term, output)
-
-    return temporal_basis_chunk, output
+    return output
   
 @partial(jit)
 def filter_components(data, spatial_r, temporal_basis):
