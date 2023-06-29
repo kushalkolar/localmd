@@ -26,6 +26,7 @@ import skimage.io
 import skimage.measure
 
 from localmd.preprocessing_utils import get_noise_estimate_vmap, center_and_get_noise_estimate, get_mean_and_noise
+from localmd.dataset import PMDDataset
 
 from sklearn.utils.extmath import randomized_svd
 
@@ -84,32 +85,6 @@ def truncated_random_svd(input_matrix, key, rank, num_oversamples=10):
     V_truncated = jax.lax.dynamic_slice(V, (0, 0), (rank, V.shape[1]))
     return [U_truncated, V_truncated]
 
-
-class tiff_dataset():
-    def __init__(self, filename):
-        self.filename = filename
-    
-    @property
-    def shape(self):
-        return self._compute_shape(self.filename)
-    
-    def _compute_shape(self, filename):
-        with tifffile.TiffFile(self.filename) as tffl:
-            num_frames = len(tffl.pages)
-            for page in tffl.pages[0:1]:
-                image = page.asarray()
-                x, y = page.shape
-        return (x,y,num_frames)
-    
-    def get_frames(self, frames):
-        '''
-        Input: 
-            frames: a list of frames to load
-        Output: 
-            np.ndarray of dimensions (d1, d2, T) where (d1, d2) are the FOV dimensions and T is the number of frames which have been loaded
-        '''
-        return tifffile.imread(self.filename, key=frames).transpose(1, 2, 0)
-        
 
 class FrameDataloader():
     def __init__(self, dataset, batch_size, frame_corrector=None, dtype="float32"):
@@ -172,6 +147,8 @@ class PMDLoader():
         self.order = order
         self.dataset = dataset
         self.dtype = dtype
+        
+        assert isinstance(dataset, PMDDataset), "Dataset object does not conform to PMDDataset API requirements" 
         self.shape = self.dataset.shape
         self._estimate_batch_size(frame_const=batch_size)
         self.pixel_batch_size=pixel_batch_size

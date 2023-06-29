@@ -2,6 +2,12 @@ import jax
 import jax.scipy
 import jax.numpy as jnp
 from jax import jit, vmap
+import numpy as np
+import sys
+import datetime
+import os
+import pathlib
+import math
 
 import functools
 from functools import partial
@@ -9,43 +15,14 @@ import time
 import scipy
 import scipy.sparse
 
-import jaxopt
-import numpy as np
-
-from localmd.evaluation import spatial_roughness_stat_vmap, temporal_roughness_stat_vmap, construct_final_fitness_decision, filter_by_failures
-
-
-import sys
-import datetime
-import os
-
-
-import os
-import pathlib
-import sys
-import math
-import tifffile
-
 from tqdm import tqdm
-
-import numpy as np
-import jax
-import jax.numpy as jnp
-from jax import jit, vmap
-import functools
-from functools import partial
-
-import scipy.sparse
 
 from localmd.preprocessing_utils import get_noise_estimate_vmap, center_and_get_noise_estimate
 from localmd.tiff_loader import PMDLoader
+from localmd.evaluation import spatial_roughness_stat_vmap, temporal_roughness_stat_vmap, construct_final_fitness_decision, filter_by_failures
 
-
-import time
 import datetime
-import sys
 import pdb
-
 
 def display(msg):
     """
