@@ -18,11 +18,10 @@ import scipy.sparse
 from tqdm import tqdm
 
 from localmd.preprocessing_utils import get_noise_estimate_vmap, center_and_get_noise_estimate
-from localmd.tiff_loader import PMDLoader
+from localmd.pmd_loader import PMDLoader
 from localmd.evaluation import spatial_roughness_stat_vmap, temporal_roughness_stat_vmap, construct_final_fitness_decision, filter_by_failures
 
 import datetime
-import pdb
 
 def display(msg):
     """
@@ -417,6 +416,7 @@ def localmd_decomposition(dataset_obj, block_sizes, overlap, frame_range, max_co
     
     display("Computing projector for sparse regression step")
     U_r, P = get_projector(U_r, V_cropped)
+    display("After performing the 4x rank reduction, the updated rank is {}".format(P.shape[1]))
 
     ## Step 2f: Do sparse regression to get the V matrix: 
     display("Running sparse regression")
