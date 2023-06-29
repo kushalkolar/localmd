@@ -38,7 +38,7 @@ from functools import partial
 import scipy.sparse
 
 from localmd.preprocessing_utils import get_noise_estimate_vmap, center_and_get_noise_estimate
-from localmd.tiff_loader import tiff_loader
+from localmd.tiff_loader import PMDLoader
 
 
 import time
@@ -165,7 +165,6 @@ def single_block_md(block, key, rank_placeholder, spatial_thres, temporal_thres)
     d1, d2, T = block.shape
     block_2d = jnp.reshape(block, (d1*d2, T), order="F")
     
-    
     decomposition = truncated_random_svd(block_2d, key, rank_placeholder)
     u_mat, v_mat = decomposition[0], decomposition[1]
     u_mat = jnp.reshape(u_mat, (d1, d2, u_mat.shape[1]), order="F")
@@ -291,136 +290,72 @@ def windowed_pmd(window_length, block, max_rank, spatial_thres, temporal_thres, 
     final_temporal_decomposition = final_temporal_decomposition[:component_counter, :]
 
     return final_spatial_decomposition, final_temporal_decomposition
-    
 
-def append_decomposition_results(curr_results, new_results):
-    '''
-    Each results list has 3 ndarrays: 
-        results[0]: The set of spatial components. Dimensions (# of blocks, d1*d2, num_comps per block). d1,d2 are block dimensions.
-        results[1]: The decisions for whether or not to accept/reject the components. Dimensions (#num blocks, num_comps per block)
-        results[2]: The set of temporal components for each block. Dimensions (# of blocks, num_comps, T) where T = number of frames in dataset.
-    '''
-    curr_results[0] = np.concatenate([curr_results[0], new_results[0][None, :, :]], axis=0)
-    curr_results[1] = np.concatenate([curr_results[1], new_results[1][None, :]], axis=0)
-    curr_results[2] = np.concatenate([curr_results[2], new_results[2][None, :, :]], axis=0)
-    
-    return curr_results
-
-
-# def get_projector(U):
-#     '''
-#     Input: 
-#         U: matrix of dimensions (d, R) where d is number of pixels, R is number of frames
-#     Returns: 
-#     Tuple (final_matrix_r_sparse, projector)
-#         final_matrix_r_sparse: a sparse version of U. Type scipy.sparse
-#         projector: the inverse term used to do a linear subspace projection of a vector onto U. I.e.
-        
-#         Proj_U (X) = U (U^TU)-1 U^T X --> projector is (U^TU)^-1
-#     '''
-#     final_matrix_r_sparse = scipy.sparse.coo_matrix(U)
-#     prod = (final_matrix_r_sparse.T.dot(final_matrix_r_sparse)).toarray()
-#     theta = np.array(jnp.linalg.inv(prod))
-#     return (final_matrix_r_sparse.T, theta)
-
-
-#Once Jax has better support for fused sparse-dense matrix operations, can merge the below two functions into one "jitted" function
-def eigenvalue_and_eigenvec_routine(Sigma):
-    
-    eig_vals, eig_vecs = jnp.linalg.eigh(Sigma)  # Note: eig vals/vecs ascending
-    eig_vals = np.array(eig_vals)
-    eig_vecs = np.array(eig_vecs)
-    eig_vecs = np.flip(eig_vecs, axis=(1,))
-    eig_vals = np.flip(eig_vals, axis=(0,))
-    
-    return eig_vecs, eig_vals
-
-def compute_sigma(spatial_components, Lt):
-    '''
-    Note: Lt here refers to the upper triangular matrix from the QR factorization of V ("temporal_components"). So 
-    temporal_components.T = Qt.dot(Lt), which means that 
-    UV = U(Lt.T)(Qt.T)
-    '''
-    Lt = np.array(Lt)
-    UtU = spatial_components.T.dot(spatial_components)
-    UtUL = UtU.dot(Lt.T)
-    Sigma = Lt.dot(UtUL)
-    
-    return Sigma
-
-
-# def factored_svd(spatial_components, temporal_components, factor = 0.25):
-#     '''
-#     This is a fast method to convert a low-rank decomposition (spatial_components * temporal_components) into a 
-#     Inputs: 
-#         spatial_components: scipy.sparse.coo_matrix. Shape (d, R)
-#         temporal_components: jax.numpy. Shape (R, T)
-#     '''
-#     Qt, Lt=  jnp.linalg.qr(temporal_components.transpose(), mode='reduced')
-#     Sigma = compute_sigma(spatial_components, Lt)
-#     eig_vecs, eig_vals = eigenvalue_and_eigenvec_routine(Sigma)
-#     Qt = np.array(Qt)
-#     Lt = np.array(Lt)
-    
-#     eig_vec_norms = np.linalg.norm(eig_vecs, axis = 0)
-#     selected_indices = eig_vals > 0
-#     eig_vecs = eig_vecs[:, selected_indices]
-#     eig_vals = eig_vals[selected_indices]
-#     singular_values = np.sqrt(eig_vals)
-    
-#     mixing_weights = np.array(jnp.matmul(Lt.T, eig_vecs / singular_values[None, :]))
-#     temporal_basis = np.array(jnp.matmul(eig_vecs.T, Qt.T))
-    
-#     #Here we prune the factorized SVD 
-#     return rank_prune_svd(mixing_weights, singular_values, temporal_basis, factor = factor)
-
-def rank_prune_svd(mixing_weights, singular_values, temporal_basis, factor = 0.25):
+def identify_window_chunks(frame_range, total_frames, window_chunks):
     '''
     Inputs: 
-        mixing_weights: numpy.ndarray, shape (R x R)
-        singular_values: numpy.ndarray, shape (R)
-        temporal_basis: numpy.ndarray, shape (R, T)
+        frame_range: number of frames to fit
+        total_frames: total number of frames in the movie
+        window_chunks: we sample continuous chunks of data throughout the movie. each chunk is of size roughly "window_chunks"
+        
+        Key requirements: 
+        (1) frame_range should be less than total number of frames
+        (2) window_chunks should be less than or equal to frame_range
+    Returns:
+        net_frames: a list containing the frames (in increasing order) which will be used for the spatial fit
     '''
-    dimension = singular_values.shape[0]
-    index = int(math.floor(factor * dimension))
-    if index == 0:
-        pass
-    elif index > singular_values.shape[0]:
-        pass
-    else:
-        mixing_weights = mixing_weights[:, :index]
-        singular_values = singular_values[:index]
-        temporal_basis = temporal_basis[:index, :]
-    display("The rank was originally {} now it is {}".format(dimension, mixing_weights.shape[1]))
-    return mixing_weights, singular_values, temporal_basis
-
-
-def localmd_decomposition(filename, block_sizes, overlap, frame_range, window_length, max_components=50, background_rank=15, sim_conf=5, batching=10, tiff_batch_size = 10000, dtype='float32', order="F", num_workers=0, pixel_batch_size=5000, frame_corrector_obj = None, max_consec_failures = 1, rank_prune_factor=1, load_obj = None):
-            
-    if load_obj is None:
-        display("No load object specified, using default multipage tiff loader")
-        load_obj = tiff_loader(filename, dtype=dtype, center=True, normalize=True, background_rank=background_rank, batch_size=tiff_batch_size, order=order, num_workers=num_workers, pixel_batch_size=pixel_batch_size, frame_corrector_obj = frame_corrector_obj)
+    assert frame_range <= total_frames
+    assert window_chunks <= frame_range
     
-    start = frame_range[0]
-    end = frame_range[1]
-    end = min(end, load_obj.shape[2])
-    frames = [i for i in range(start, end)]
-    assert end - start >= window_length and window_length > 0, "Window length needs to be nonneg and at most the range of frames in spatial fit"
+    num_itervals = math.ceil(frame_range / window_chunks)
+    
+    available_intervals = np.arange(0, total_frames, window_chunks)
+    starting_points = np.random.choice(available_intervals, size=num_itervals, replace=False)
+    starting_points = np.sort(starting_points)
+    display("sampled from the following regions: {}".format(starting_points))
+    
+    net_frames = []
+    for k in starting_points:
+        curr_start = k
+        curr_end = min(k + window_chunks, total_frames-1)
+        
+        curr_frame_list = [i for i in range(curr_start, curr_end)]
+        net_frames.extend(curr_frame_list)
+    return net_frames
+ 
+
+def localmd_decomposition(dataset_obj, block_sizes, overlap, frame_range, max_components=50, background_rank=15, sim_conf=5, batching=10, tiff_batch_size = 10000, dtype='float32', order="F", num_workers=0, pixel_batch_size=5000, frame_corrector_obj = None, max_consec_failures = 1):
+    
+    load_obj = PMDLoader(dataset_obj, dtype=dtype, center=True, normalize=True, background_rank=background_rank, batch_size=tiff_batch_size, order=order, num_workers=num_workers, pixel_batch_size=pixel_batch_size, frame_corrector_obj = frame_corrector_obj)
+    
+    #Decide which chunks of the data you will use for the spatial PMD blockwise fits
+    window_chunks = 1000 #We will sample chunks of frames throughout the movie
+    if load_obj.shape[2] <= frame_range:
+        display("WARNING: Specified using more frames than there are in the dataset.")
+        start = 0
+        end = load_obj.shape[2]
+        frames = [i for i in range(start, end)]
+    else:
+        if frame_range <= window_chunks:
+            window_chunks = frame_range
+        frames = identify_window_chunks(frame_range, load_obj.shape[2], window_chunks)
+    display("We are initializing on a total of {} frames".format(len(frames)))
+        
     block_sizes = block_sizes
     overlap = overlap
     
-    ##Step 2a: Get the spatial and temporal thresholds
-    display("Running Simulations, block dimensions are {} x {} x {} ".format(block_sizes[0], block_sizes[1], window_length))
-    spatial_thres, temporal_thres = threshold_heuristic([block_sizes[0], block_sizes[1], window_length], num_comps = 1, iters=250, percentile_threshold=sim_conf)
+    ##Get the spatial and temporal thresholds
+    display("Running Simulations, block dimensions are {} x {} x {} ".format(block_sizes[0], block_sizes[1],len(frames)))
+    spatial_thres, temporal_thres = threshold_heuristic([block_sizes[0], block_sizes[1], len(frames)], num_comps = 1, iters=250, percentile_threshold=sim_conf)
     
-    ##Step 2b: Load the data you will do blockwise SVD on
+    ##Load the data you will do blockwise SVD on
     display("Loading Data")
-    data, temporal_basis_crop = load_obj.temporal_crop_with_filter([i for i in range(start, end)])
+    data, temporal_basis_crop = load_obj.temporal_crop_with_filter(frames)
     data_std_img = load_obj.std_img #(d1, d2) shape
     data_mean_img = load_obj.mean_img #(d1, d2) shape
     data_spatial_basis = load_obj.spatial_basis.reshape((load_obj.shape[0], load_obj.shape[1], -1), order=load_obj.order)
     
-    ##Step 2c: Run PMD and get the U matrix components
+    ##Run PMD and get the compressed spatial representation of the data
     display("Obtaining blocks and running local SVD")
     cumulator = []
 
@@ -464,7 +399,7 @@ def localmd_decomposition(filename, block_sizes, overlap, frame_range, window_le
             pairs.append((k, j))
             subset = data[k:k+block_sizes[0], j:j+block_sizes[1], :].astype(dtype)
             
-            spatial_cropped, temporal_cropped = windowed_pmd(window_length, subset, max_components, spatial_thres, temporal_thres, max_consec_failures)
+            spatial_cropped, temporal_cropped = windowed_pmd(len(frames), subset, max_components, spatial_thres, temporal_thres, max_consec_failures)
             total_temporal_fit.append(temporal_cropped)
             
             #Weight the spatial components here
@@ -498,22 +433,17 @@ def localmd_decomposition(filename, block_sizes, overlap, frame_range, window_le
         [(1 / weight_normalization_diag).ravel()], [0])
     U_r = normalizing_weights.dot(U_r)
     
-    #Insert function here to append the spatial and temporal background to U_r and V_cropped
+    #Ippend the spatial and temporal background to U_r and V_cropped
     U_r, V_cropped = aggregate_UV(U_r, V_cropped, load_obj.spatial_basis, temporal_basis_crop)
     
     display("The total number of identified components before pruning is {}".format(U_r.shape[1]))
     
     display("Computing projector for sparse regression step")
     U_r, P = get_projector(U_r, V_cropped)
-    # projector = get_projector(U_r)
 
     ## Step 2f: Do sparse regression to get the V matrix: 
     display("Running sparse regression")
     V = load_obj.V_projection([U_r.T, P.T])
-
-    ## Step 2g: Aggregate the global SVD with the localMD results to create the final decomposition
-    # display("Aggregating Global SVD with localMD results")
-    # U_r, V = aggregate_decomposition(U_r, V, load_obj)
     
     #Extract necessary info from the loader object and delete it. This frees up space on GPU for the below linalg.eigh computations
     std_img = load_obj.std_img
@@ -521,10 +451,6 @@ def localmd_decomposition(filename, block_sizes, overlap, frame_range, window_le
     order = load_obj.order
     shape = load_obj.shape
     del load_obj
-    # jax.clear_backends()
-    
-#     U_r = U_r.astype(dtype)
-#     V = V.astype(dtype)
 
     ## Step 2h: Do a SVD Reformat given U and V
     display("Running QR decomposition on V")
