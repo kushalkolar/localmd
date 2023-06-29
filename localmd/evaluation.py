@@ -7,7 +7,6 @@ jit-able.
 import jax
 import jax.scipy
 import jax.numpy as jnp
-import jax.numpy as jnp
 from jax import jit, vmap
 import functools
 from functools import partial

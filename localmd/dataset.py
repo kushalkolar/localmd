@@ -1,8 +1,5 @@
 import numpy as np
 import tifffile
-import sys
-import os
-
 from abc import ABC, abstractmethod
 
 class PMDDataset(ABC):
