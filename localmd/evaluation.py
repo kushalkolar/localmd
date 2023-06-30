@@ -7,14 +7,11 @@ jit-able.
 import jax
 import jax.scipy
 import jax.numpy as jnp
-import jax.numpy as jnp
 from jax import jit, vmap
 import functools
 from functools import partial
 
 import numpy as np
-
-
 
 #@partial(jit)
 def l1_norm(data):
@@ -87,20 +84,6 @@ def total_variation_stat(img):
     
     return jnp.sum(accumulator)
 
-#@partial(jit)
-# def spatial_roughness_stat(img):
-#     '''
-#     Input: 
-#         img: jnp.array, dimensions (d1, d2) where d1 and d2 are image FOV dimensions
-#     Output: 
-#         stat: float. spatial roughness statistic
-    
-#     '''
-#     img = img / jnp.linalg.norm(img)
-#     numerator = total_variation_stat(img)
-#     denominator = l1_norm(img)
-#     return numerator/denominator
-
 def spatial_roughness_stat(u):
     '''
     Input: 
@@ -123,22 +106,6 @@ def spatial_roughness_stat(u):
     avg_elem = jnp.mean(jnp.abs(u))
     
     return avg_diff / avg_elem
-
-
-#@partial(jit)
-# def temporal_roughness_stat(trace):
-#     '''
-#     Input: 
-#         img: jnp.array, shape (T,) where T is the length of the temporal trace
-#     Output: 
-#         stat: float. temporal roughness statistic statistic
-    
-#     '''
-#     trace = trace / jnp.linalg.norm(trace)
-#     numerator = trend_filter_stat(trace)
-#     denominator = l1_norm(trace)
-#     return numerator/denominator
-
 
 def temporal_roughness_stat(v):
     '''
@@ -176,90 +143,27 @@ def evaluate_fitness(img, trace, spatial_thres, temporal_thres):
 evaluate_fitness_vmap = vmap(evaluate_fitness, in_axes=(2, 1, None, None))
 
 #@partial(jit)
-def construct_final_fitness_decision(imgs, traces, spatial_thres, temporal_thres, max_consec_failures):
+def construct_final_fitness_decision(imgs, traces, spatial_thres, temporal_thres):
     output = evaluate_fitness_vmap(imgs, traces, spatial_thres, temporal_thres)
-    
-    final_output = successive_filter(output, max_consec_failures)
-    return final_output
+    return output
 
-#@partial(jit)
-def successive_filter(my_list, max_consec_failures):
-    start = -1
-    consec_failures = 0
-    
-    init_pytree = (consec_failures, start, my_list, max_consec_failures)
-    final_pytree = jax.lax.fori_loop(0, my_list.shape[0], manage_successive_failures_iteration, init_pytree)
-    start = final_pytree[1]
-    my_list = jax.lax.cond(start == -1, lambda x:x[0], filter_from_starting_pt, (my_list, start))
-    
-    return my_list
-    
-#@partial(jit)                
-def filter_from_starting_pt(input_pytree):
-    my_list = input_pytree[0]
-    start = input_pytree[1]
-    temp_arange = jnp.arange(my_list.shape[0])
-    temp_arange = temp_arange < start
-    
-    return my_list * temp_arange
-
-#@partial(jit)
-def manage_failure(input_pytree):
-    consec_failures = input_pytree[0]
-    start = input_pytree[1]
-    k = input_pytree[2]
-    max_consec_failures = input_pytree[3]
-    
-    new_pytree = jax.lax.cond(consec_failures == 0, first_failure, multi_failure, (k, start, consec_failures))
-    
-    return (new_pytree[0], new_pytree[1])
-
-#@partial(jit)
-def first_failure(input_pytree):
-    k = input_pytree[0]
-    start = input_pytree[1]
-    consec_failures = input_pytree[2]
-    
-    
-    start = k
-    consec_failures = consec_failures + 1
-    return (consec_failures, start)
-
-#@partial(jit)
-def multi_failure(input_pytree):
-    k = input_pytree[0]
-    start = input_pytree[1]
-    consec_failures = input_pytree[2]
-
-    consec_failures = consec_failures + 1
-    start = start
-    
-    return (consec_failures, start)
-
-def manage_success(input_pytree):
-    consec_failures = input_pytree[0]
-    start = input_pytree[1]
-    k = input_pytree[2]
-    max_consec_failures = input_pytree[3]
-    
-    consec_failures = jax.lax.cond(consec_failures < max_consec_failures, lambda x:0, lambda x:x, consec_failures)
-    
-    return (consec_failures, start)
-    
-    
-def manage_successive_failures_iteration(k, input_pytree):
-    consec_failures = input_pytree[0]
-    start = input_pytree[1]
-    my_list = input_pytree[2]
-    max_consec_failures = input_pytree[3]
-    value = jnp.take(my_list, k)
-    
-    constructed_pytree = (consec_failures, start, k, max_consec_failures)
-    
-    output_pytree = jax.lax.cond(value == 0, manage_failure, manage_success, constructed_pytree)
-    
-    consec_failures = output_pytree[0]
-    start = output_pytree[1]
-    
-    return (consec_failures, start, my_list, max_consec_failures)
-
+def filter_by_failures(decisions, max_consecutive_failures):
+    '''
+    Input: 
+        - decisions: 1-dimensional np.ndarray. Boolean values.
+    Ouput: 
+        - decisions_filtered: same shape/types a decisionos. 
+    '''
+    number_of_failures = 0
+    all_fails = False
+    for k in range(decisions.shape[0]):
+        if all_fails:
+            decisions[k] = False
+        elif not decisions[k]:
+            number_of_failures += 1
+            if number_of_failures == max_consecutive_failures:
+                all_fails = True
+        else:
+            number_of_failures = 0
+    return decisions
+            
