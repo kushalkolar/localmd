@@ -542,6 +542,9 @@ def left_smaller_svd_routine(P, V):
     '''
     VVt = jnp.matmul(V, V.transpose())
     vals, Left = jnp.linalg.eigh(VVt)
+    vals = jnp.flip(vals, axis=(0,))
+    Left = jnp.flip(Left, axis=(1,))
+    
     singular = jnp.sqrt(vals)
     divisor = jnp.where(singular == 0, 1, singular)
     Right = jnp.divide(jnp.matmul(Left.transpose(), V), jnp.expand_dims(divisor, 1))
@@ -551,18 +554,18 @@ def left_smaller_svd_routine(P, V):
     
     
 @partial(jit)
-def right_smaller_svd_routine(V):
+def right_smaller_svd_routine(P, V):
     '''
     We compute the SVD of V using jax jittable functions. linalg.eigh is faster, so we want to use that. 
     Assume here that V is d1 x d2, and d1 > d2.
     '''
     VtV = jnp.matmul(V.transpose(), V)
     vals, Right= jnp.linalg.eigh(VtV)
+    vals = jnp.flip(vals, axis=(0,))
+    Right = jnp.flip(Right, axis=(1,))
     Right = Right.transpose()
     singular = jnp.sqrt(vals)
     divisor = jnp.where(singular == 0, 1, singular)
     
-    Left = jnp.matmul(V, jnp.divide(Right.transpose(), jnp.expand_dims(divisor, axis=0)))
+    Left = jnp.divide(V, jnp.divide(Right.transpose(), jnp.expand_dims(divisor, axis=0)))
     PL = jnp.matmul(P, Left)
-    
-    return PL, singular, Right
