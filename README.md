@@ -10,7 +10,17 @@ jax>=0.3.25
 jaxlib>=0.3.25
 ```
 
-To install all dependencies, do the following: 
+To install this repository into your python environment from the source code, do the following (this approach is recommended for now): 
+```
+#Step 1: Install the appropriate version of jax for your hardware system 
+
+#Step 2: Run the below lines of code
+git clone https://github.com/apasarkar/localmd.git
+cd localmd
+pip install -e .
+```
+
+To install dependencies using pip, do the following: 
 
 ```
 #Step 1: Install the appropriate version of jax for your hardware system 
@@ -18,6 +28,8 @@ To install all dependencies, do the following:
 #Step 2: Run the below line of code
 pip install localmd
 ```
+
+
 
 ## Low-Rank Decomposition Documentation
 In our demo script (localmd/demos), you will notice that we save the results of our low-rank matrix decomposition in a .npz file. This is our standard representation for saving the compressed results. We use the following:
