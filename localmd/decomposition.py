@@ -22,6 +22,7 @@ from localmd.pmd_loader import PMDLoader
 from localmd.evaluation import spatial_roughness_stat_vmap, temporal_roughness_stat_vmap, construct_final_fitness_decision, filter_by_failures
 
 import datetime
+import pdb
 
 def display(msg):
     """
@@ -380,7 +381,7 @@ def localmd_decomposition(dataset_obj, block_sizes, overlap, frame_range, max_co
             
             #Weight the spatial components here
             spatial_cropped = spatial_cropped * block_weights[:, :, None]
-            current_cumulative_weight = block_weights * spatial_cropped.shape[2]
+            current_cumulative_weight = block_weights
             cumulative_weights[k:k+block_sizes[0], j:j+block_sizes[1]] += current_cumulative_weight
             
             sparse_col_indices = sparse_indices[k:k+block_sizes[0], j:j+block_sizes[1]][:, :, None]
@@ -409,14 +410,12 @@ def localmd_decomposition(dataset_obj, block_sizes, overlap, frame_range, max_co
         [(1 / weight_normalization_diag).ravel()], [0])
     U_r = normalizing_weights.dot(U_r)
     
-    #Ippend the spatial and temporal background to U_r and V_cropped
     U_r, V_cropped = aggregate_UV(U_r, V_cropped, load_obj.spatial_basis, temporal_basis_crop)
+    display("The total rank before pruning is {}".format(U_r.shape[1]))
     
-    display("The total number of identified components before pruning is {}".format(U_r.shape[1]))
-    
-    display("Computing projector for sparse regression step")
+    display("Performing rank pruning and orthogonalization for fast sparse regression.")
     U_r, P = get_projector(U_r, V_cropped)
-    display("After performing the 4x rank reduction, the updated rank is {}".format(P.shape[1]))
+    display("After performing rank reduction, the updated rank is {}".format(P.shape[1]))
 
     ## Step 2f: Do sparse regression to get the V matrix: 
     display("Running sparse regression")
@@ -430,7 +429,7 @@ def localmd_decomposition(dataset_obj, block_sizes, overlap, frame_range, max_co
     del load_obj
 
     ## Step 2h: Do a SVD Reformat given U and V
-    display("Running QR decomposition on V")
+    display("Final reformat of data into complete SVD")
     R, s, Vt = factored_svd(P, V)
     R = np.array(R)
     s = np.array(s)
@@ -438,7 +437,7 @@ def localmd_decomposition(dataset_obj, block_sizes, overlap, frame_range, max_co
 
     display("Matrix decomposition completed")
 
-    return U_r, R, s, Vt, std_img, mean_img, shape, order#, load_obj
+    return U_r, R, s, Vt, std_img, mean_img, shape, order
 
 
 def aggregate_UV(U, V, spatial_basis, temporal_basis):
@@ -461,7 +460,7 @@ def aggregate_UV(U, V, spatial_basis, temporal_basis):
     return U_net, V_net
 
 
-def get_projector(U, V):
+def get_projector(U, V, deterministic = False):
     '''
     This function uses random projection method described in Halko to find an orthonormal subspace which approximates the 
     column span of UV. We want to express this subspace as a factorization: UP; this way we can keep the nice sparsity and avoid ever dealing with dense d x K (for any K) matrices (where d = number of pixels in movie). 
@@ -472,45 +471,116 @@ def get_projector(U, V):
     Returns: 
         Tuple (U, P) (described above)
     '''
-    rank_prune_factor= 3.8
+    rank_prune_target = 3
+    rank_prune_factor= rank_prune_target / 1.05
     tol = 0.0001
-    keep_value = min(int(U.shape[1] / 4), V.shape[1])
+    keep_value = min(int(U.shape[1] / rank_prune_target), V.shape[1])
     
-    if int(U.shape[1] / 4) < V.shape[1]:
-        random_mat = np.random.randn(V.shape[1], int(U.shape[1]/rank_prune_factor))
-        random_mat = np.array(jnp.matmul(V, random_mat))
+    
+    if not deterministic: 
+        if int(U.shape[1] / rank_prune_target) < V.shape[1] and rank_prune_target > 1:
+            random_mat = np.random.randn(V.shape[1], int(U.shape[1]/rank_prune_factor))
+            random_mat = np.array(jnp.matmul(V, random_mat))
+        else:
+            random_mat = V
+        UtU = U.T.dot(U)
+        UtUR = UtU.dot(random_mat)
+        RtUtUR = np.array(jnp.matmul(random_mat.T, UtUR))
+
+        eig_vecs, eig_vals, _ = jnp.linalg.svd(RtUtUR, full_matrices=False, hermitian=True)
+        eig_vals = np.array(eig_vals)
+        eig_vecs = np.array(eig_vecs)
+
+        #Now filter any remaining bad components
+        good_components = np.logical_and(np.abs(eig_vals) > tol, eig_vals > 0)
+
+        #Apply the eigenvectors to random_mat
+        random_mat_e = np.array(jnp.matmul(random_mat, eig_vecs))
+
+        singular_values = np.sqrt(eig_vals) 
+
+        random_mat_e = random_mat_e / singular_values[None, :]
+
+        random_mat_e = random_mat_e[:, good_components]
+        random_mat_e = random_mat_e[:, :keep_value]
+        return (U, random_mat_e)
+    
     else:
-        random_mat = V
-    UtU = U.T.dot(U)
-    UtUR = UtU.dot(random_mat)
-    # RtUtUR = random_mat.T.dot(UtUR)
-    RtUtUR = np.array(jnp.matmul(random_mat.T, UtUR))
+        display("For Reference purposes only: DETERMINISTIC")
+        R, s, T = factored_svd_debug(U, V, factor = 0.5)
+        return U, R
+
+
+#Once Jax has better support for fused sparse-dense matrix operations, can merge the below two functions into one "jitted" function
+def eigenvalue_and_eigenvec_routine(Sigma):
     
-    eig_vals, eig_vecs = jnp.linalg.eigh(RtUtUR)
+    eig_vals, eig_vecs = jnp.linalg.eigh(Sigma)  # Note: eig vals/vecs ascending
     eig_vals = np.array(eig_vals)
     eig_vecs = np.array(eig_vecs)
-    
     eig_vecs = np.flip(eig_vecs, axis=(1,))
     eig_vals = np.flip(eig_vals, axis=(0,))
     
-    eig_vals = eig_vals[:keep_value]
-    eig_vecs = eig_vecs[:, :keep_value]
+    return eig_vecs, eig_vals
+
+def compute_sigma(spatial_components, Lt):
+    '''
+    Note: Lt here refers to the upper triangular matrix from the QR factorization of V ("temporal_components"). So 
+    temporal_components.T = Qt.dot(Lt), which means that 
+    UV = U(Lt.T)(Qt.T)
+    '''
+    Lt = np.array(Lt)
+    UtU = spatial_components.T.dot(spatial_components)
+    UtUL = UtU.dot(Lt.T)
+    Sigma = Lt.dot(UtUL)
     
-    #Now filter any remaining bad components
-    good_components = np.abs(eig_vals) > tol
-    eig_vals = eig_vals[good_components]
-    eig_vecs = eig_vecs[:, good_components]
-    
-    #Apply the eigenvectors to random_mat
-    # random_mat_e = random_mat.dot(eig_vecs)
-    random_mat_e = np.array(jnp.matmul(random_mat, eig_vecs))
-    singular_values = np.sqrt(eig_vals) 
-    
-    random_mat_e = random_mat_e / singular_values[None, :]
-    
-    return (U, random_mat_e)
+    return Sigma
 
 
+def rank_prune_svd(mixing_weights, singular_values, temporal_basis, factor = 0.25):
+    '''
+    Inputs: 
+        mixing_weights: numpy.ndarray, shape (R x R)
+        singular_values: numpy.ndarray, shape (R)
+        temporal_basis: numpy.ndarray, shape (R, T)
+    '''
+    dimension = singular_values.shape[0]
+    index = int(math.floor(factor * dimension))
+    if index == 0:
+        pass
+    elif index > singular_values.shape[0]:
+        pass
+    else:
+        mixing_weights = mixing_weights[:, :index]
+        singular_values = singular_values[:index]
+        temporal_basis = temporal_basis[:index, :]
+    display("The rank was originally {} now it is {}".format(dimension, mixing_weights.shape[1]))
+    return mixing_weights, singular_values, temporal_basis
+
+def factored_svd_debug(spatial_components, temporal_components, factor = 0.25):
+    '''
+    This is a fast method to convert a low-rank decomposition (spatial_components * temporal_components) into a 
+    Inputs: 
+        spatial_components: scipy.sparse.coo_matrix. Shape (d, R)
+        temporal_components: jax.numpy. Shape (R, T)
+    '''
+    Qt, Lt=  jnp.linalg.qr(temporal_components.transpose(), mode='reduced')
+    Sigma = compute_sigma(spatial_components, Lt)
+    eig_vecs, eig_vals = eigenvalue_and_eigenvec_routine(Sigma)
+    Qt = np.array(Qt)
+    Lt = np.array(Lt)
+    
+    eig_vec_norms = np.linalg.norm(eig_vecs, axis = 0)
+    selected_indices = eig_vals > 0
+    eig_vecs = eig_vecs[:, selected_indices]
+    eig_vals = eig_vals[selected_indices]
+    singular_values = np.sqrt(eig_vals)
+    
+    mixing_weights = np.array(jnp.matmul(Lt.T, eig_vecs / singular_values[None, :]))
+    temporal_basis = np.array(jnp.matmul(eig_vecs.T, Qt.T))
+    
+    #Here we prune the factorized SVD 
+    return rank_prune_svd(mixing_weights, singular_values, temporal_basis, factor = factor)
+   
 
 
 def aggregate_decomposition(U_r, V, load_obj):
@@ -530,8 +600,10 @@ def aggregate_decomposition(U_r, V, load_obj):
 def factored_svd(P, V):
     d1, d2 = V.shape
     if d1 <= d2: 
+        display("Short matrix, using leftward SVD routine")
         return left_smaller_svd_routine(P, V)
     else:
+        display("Tall matrix, using rightward SVD routine")
         return right_smaller_svd_routine(P, V)
 
 @partial(jit)
@@ -541,10 +613,7 @@ def left_smaller_svd_routine(P, V):
     Assume here that V is d1 x d2, and d1 <= d2.
     '''
     VVt = jnp.matmul(V, V.transpose())
-    vals, Left = jnp.linalg.eigh(VVt)
-    vals = jnp.flip(vals, axis=(0,))
-    Left = jnp.flip(Left, axis=(1,))
-    
+    Left, vals, _ = jnp.linalg.svd(VVt, full_matrices=False, hermitian=True)#jnp.linalg.eigh(VVt)
     singular = jnp.sqrt(vals)
     divisor = jnp.where(singular == 0, 1, singular)
     Right = jnp.divide(jnp.matmul(Left.transpose(), V), jnp.expand_dims(divisor, 1))
@@ -560,12 +629,9 @@ def right_smaller_svd_routine(P, V):
     Assume here that V is d1 x d2, and d1 > d2.
     '''
     VtV = jnp.matmul(V.transpose(), V)
-    vals, Right= jnp.linalg.eigh(VtV)
-    vals = jnp.flip(vals, axis=(0,))
-    Right = jnp.flip(Right, axis=(1,))
-    Right = Right.transpose()
+    Right_T, vals, _ = jnp.linalg.svd(VtV, full_matrices=False, hermitian=True)#jnp.linalg.eigh(VtV)
     singular = jnp.sqrt(vals)
     divisor = jnp.where(singular == 0, 1, singular)
     
-    Left = jnp.divide(V, jnp.divide(Right.transpose(), jnp.expand_dims(divisor, axis=0)))
+    Left = jnp.matmul(V, jnp.divide(Right_T, jnp.expand_dims(divisor, axis=0)))
     PL = jnp.matmul(P, Left)
