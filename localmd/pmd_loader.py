@@ -81,6 +81,10 @@ class FrameDataloader():
         return self.dataset.shape
     
     def __getitem__(self, index):
+        '''
+        This function takes as input an index which describes a "chunk" (of length roughly self.batch_size) of frames to be be loaded. It returns a np.ndarray of shape: 
+        (d1, d2, frames), where (d1, d2) are the FOV dimensions of the data and frames is the number of frames in the chunk. 
+        '''
         start_time = time.time()
         start = index * self.batch_size
         
@@ -371,15 +375,26 @@ class PMDLoader():
             start = 0
 
             if self.frame_corrector is not None:
-                registration_method = self.frame_corrector.register_frames
+                registration_alg = self.frame_corrector.register_frames
+                def registration_function(frames):
+                    '''
+                    The registration function currently takes input as (T, d1, d2) where T is the number of frames to be registered, and 
+                    d1,d2 are the usual FOV dimensions. But the below pipeline takes inputs of shape (d1, d2, T), so this function 
+                    uses negligible cost transposes to bridge this gap. 
+                    '''
+                    data = jnp.transpose(frames, (2,0,1))
+                    new_frames = registration_alg(data)
+                    return jnp.transpose(new_frames, (1,2,0))
+                registration_method = registration_function
             else:
                 def return_identity(frames):
                     return frames
                 registration_method = return_identity
+                
+                
             def full_V_projection_routine_jax(order, register_func, inv_term, sparse_project_term, data, mean_img_r, std_img_r):
                 new_data = register_func(data)
                 return V_projection_routine_jax(self.order, inv_term, sparse_project_term, new_data, mean_img_r, std_img_r)
-
             full_V_projection_routine = jit(full_V_projection_routine_jax, static_argnums=(0, 1))
 
             start = 0
@@ -460,7 +475,6 @@ def get_temporal_basis_jax(D, spatial_basis, mean_img_r, std_img_r):
 
 # @partial(jit, static_argnums=(0))
 def V_projection_routine_jax(order, inv_term, M, D, mean_img_r, std_img_r):
-    # D = jnp.transpose(D, (1,2,0))
     D = jnp.reshape(D, (-1, D.shape[2]), order=order)
     D = D - mean_img_r
     D = D / std_img_r
