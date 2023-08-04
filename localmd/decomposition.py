@@ -301,7 +301,7 @@ def identify_window_chunks(frame_range, total_frames, window_chunks):
     return net_frames
  
 
-def localmd_decomposition(dataset_obj, block_sizes, overlap, frame_range, max_components=50, background_rank=15, sim_conf=5, batching=10, frame_batch_size = 10000, dtype='float32', order="F", num_workers=0, pixel_batch_size=5000, frame_corrector_obj = None, max_consec_failures = 1):
+def localmd_decomposition(dataset_obj, block_sizes, frame_range, max_components=50, background_rank=15, sim_conf=5, batching=10, frame_batch_size = 10000, dtype='float32', order="F", num_workers=0, pixel_batch_size=5000, frame_corrector_obj = None, max_consec_failures = 1):
     
     load_obj = PMDLoader(dataset_obj, dtype=dtype, center=True, normalize=True, background_rank=background_rank, batch_size=frame_batch_size, order=order, num_workers=num_workers, pixel_batch_size=pixel_batch_size, frame_corrector_obj = frame_corrector_obj)
     
@@ -319,7 +319,7 @@ def localmd_decomposition(dataset_obj, block_sizes, overlap, frame_range, max_co
     display("We are initializing on a total of {} frames".format(len(frames)))
         
     block_sizes = block_sizes
-    overlap = overlap
+    overlap = [math.ceil(block_sizes[0] / 2), math.ceil(block_sizes[1] / 2)]
     
     ##Get the spatial and temporal thresholds
     display("Running Simulations, block dimensions are {} x {} x {} ".format(block_sizes[0], block_sizes[1],len(frames)))
