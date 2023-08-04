@@ -82,7 +82,7 @@ class FrameDataloader():
     
     def __getitem__(self, index):
         '''
-        This function takes as input an index which describes a "chunk" (of length roughly self.batch_size) of frames to be be loaded. It returns a np.ndarray of shape: 
+        This function takes as input an index which describes a "chunk" (of length roughly self.batch_size) of frames to be loaded. It returns a np.ndarray of shape: 
         (d1, d2, frames), where (d1, d2) are the FOV dimensions of the data and frames is the number of frames in the chunk. 
         '''
         start_time = time.time()
@@ -112,7 +112,7 @@ class PMDLoader():
     def __init__(self, dataset, dtype='float32', center=True, normalize=True, background_rank=15, batch_size=2000, order="F", num_workers = None, pixel_batch_size=5000, frame_corrector_obj = None, num_samples = 8):
         '''
         Inputs: 
-            dataset: <INSERT TYPE> object. This is a basic reader which allows us to read frames of the input data. 
+            dataset: Object which implements the PMDDataset abstract interface. This is a basic reader which allows us to read frames of the input data. 
             dtype: np.dtype. intended format of data
             center: bool. whether or not to center the data before denoising
             normalize: bool. whether or not noise normalize the data
