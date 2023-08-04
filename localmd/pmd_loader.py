@@ -109,7 +109,7 @@ class FrameDataloader():
 
 
 class PMDLoader():
-    def __init__(self, dataset, dtype='float32', center=True, normalize=True, background_rank=15, batch_size=2000, order="F", num_workers = None, pixel_batch_size=5000, frame_corrector_obj = None, num_samples = 8):
+    def __init__(self, dataset, dtype='float32', center=True, normalize=True, background_rank=15, batch_size=2000, num_workers = None, pixel_batch_size=5000, frame_corrector_obj = None, num_samples = 8):
         '''
         Inputs: 
             dataset: Object which implements the PMDDataset abstract interface. This is a basic reader which allows us to read frames of the input data. 
@@ -118,7 +118,6 @@ class PMDLoader():
             normalize: bool. whether or not noise normalize the data
             background_rank: int. we run an approximate truncated svd on the full FOV of the data, of rank 'background_rank'. We subtract this from the data before running the core matrix decomposition compression method
             batch_size: max number of frames to load into memory (CPU and GPU) at a time
-            order: the order (either "C" or "F") in which we reshape 2D data into 3D videos and vice versa
             num_workers: int, keep it at 0 for now. Number of workers used in pytorch dataloading. Experimental and best kept at 0. 
             pixel_batch_size: int. maximum number of pixels of data we load onto GPU at any point in time
             frame_corrector_obj: jnormcorre frame corrector object. This is used to register loaded data on the fly. So in a complete pipeline, like the maskNMF pipeline, we can load data, correct it on the fly, and compress it. Avoids the need to explicitly rewrite the data onto disk during registration. 
@@ -126,7 +125,7 @@ class PMDLoader():
         
         
         '''
-        self.order = order
+        self._order = "F" 
         self.dataset = dataset
         self.dtype = dtype
         
@@ -159,6 +158,9 @@ class PMDLoader():
         self._initialize_all_normalizers()
         self._initialize_all_background()
     
+    @property
+    def order(self):
+        return self._order
     
     def _get_size_in_GB(self, obj_to_measure):
         val = getsizeof(obj_to_measure)
