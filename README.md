@@ -20,16 +20,6 @@ cd localmd
 pip install -e .
 ```
 
-To install dependencies using pip, do the following: 
-
-```
-#Step 1: Install the appropriate version of jax for your hardware system 
-
-#Step 2: Run the below line of code
-pip install localmd
-```
-
-
 
 ## Low-Rank Decomposition Documentation
 In our demo script (localmd/demos), you will notice that we save the results of our low-rank matrix decomposition in a .npz file. This is our standard representation for saving the compressed results. We use the following:
