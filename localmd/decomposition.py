@@ -70,7 +70,6 @@ def decomposition_no_normalize_approx(block, key, rank_placeholder):
     
     u_mat, v_mat = decomposition[0], decomposition[1]
     u_mat = jnp.reshape(u_mat, (d1, d2, u_mat.shape[1]), order="F")
-    
     spatial_statistics = spatial_roughness_stat_vmap(u_mat)
     temporal_statistics = temporal_roughness_stat_vmap(v_mat)
 
@@ -225,15 +224,12 @@ def windowed_pmd(window_length, block, max_rank, spatial_thres, temporal_thres, 
     window_range = block.shape[2]
     assert window_length <= window_range
     start_points = list(range(0, window_range, window_length))
-    if start_points[-1] > window_range - window_length:
-        start_points[-1] = window_range - window_length
     
     final_spatial_decomposition = np.zeros((d1, d2, max_rank))
     remaining_components = max_rank
     
     component_counter = 0
     rank_placeholder = np.zeros((max_rank,))
-    
     for k in start_points:
         start_value = k
         end_value = start_value + window_length
@@ -273,13 +269,13 @@ def identify_window_chunks(frame_range, total_frames, window_chunks):
     Inputs: 
         frame_range: number of frames to fit
         total_frames: total number of frames in the movie
-        window_chunks: we sample continuous chunks of data throughout the movie. each chunk is of size roughly "window_chunks"
+        window_chunks: we sample continuous chunks of data throughout the movie. each chunk is of size "window_chunks"
         
         Key requirements: 
         (1) frame_range should be less than total number of frames
         (2) window_chunks should be less than or equal to frame_range
     Returns:
-        net_frames: a list containing the frames (in increasing order) which will be used for the spatial fit
+        net_frames: list. Contains the starting point of the intervals (each of length "window_chunk") on which we do the decomposition.
     '''
     assert frame_range <= total_frames
     assert window_chunks <= frame_range
@@ -287,6 +283,8 @@ def identify_window_chunks(frame_range, total_frames, window_chunks):
     num_itervals = math.ceil(frame_range / window_chunks)
     
     available_intervals = np.arange(0, total_frames, window_chunks)
+    if available_intervals[-1] > total_frames - window_chunks:
+        available_intervals[-1] = total_frames - window_chunks
     starting_points = np.random.choice(available_intervals, size=num_itervals, replace=False)
     starting_points = np.sort(starting_points)
     display("sampled from the following regions: {}".format(starting_points))
@@ -306,14 +304,20 @@ def localmd_decomposition(dataset_obj, block_sizes, frame_range, max_components=
     load_obj = PMDLoader(dataset_obj, dtype=dtype, center=True, normalize=True, background_rank=background_rank, batch_size=frame_batch_size, num_workers=num_workers, pixel_batch_size=pixel_batch_size, frame_corrector_obj = frame_corrector_obj)
     
     #Decide which chunks of the data you will use for the spatial PMD blockwise fits
-    window_chunks = 1000 #We will sample chunks of frames throughout the movie
+    window_chunks = 2000 #We will sample chunks of frames throughout the movie
     if load_obj.shape[2] <= frame_range:
         display("WARNING: Specified using more frames than there are in the dataset.")
+        frame_range = load_obj.shape[2]
         start = 0
         end = load_obj.shape[2]
         frames = [i for i in range(start, end)]
+        if frame_range <= window_chunks:
+            display("WARNING: Initializing on less than {} frames, this will lead to limited benefits.".format(window_chunk))
+            window_chunks = frame_range
     else:
         if frame_range <= window_chunks:
+            if frame_range < window_chunks:
+                display("WARNING: Initializing on less than {} frames, this will lead to limited benefits.".format(window_chunk))
             window_chunks = frame_range
         frames = identify_window_chunks(frame_range, load_obj.shape[2], window_chunks)
     display("We are initializing on a total of {} frames".format(len(frames)))
@@ -322,8 +326,8 @@ def localmd_decomposition(dataset_obj, block_sizes, frame_range, max_components=
     overlap = [math.ceil(block_sizes[0] / 2), math.ceil(block_sizes[1] / 2)]
     
     ##Get the spatial and temporal thresholds
-    display("Running Simulations, block dimensions are {} x {} x {} ".format(block_sizes[0], block_sizes[1],len(frames)))
-    spatial_thres, temporal_thres = threshold_heuristic([block_sizes[0], block_sizes[1], len(frames)], num_comps = 1, iters=250, percentile_threshold=sim_conf)
+    display("Running Simulations, block dimensions are {} x {} x {} ".format(block_sizes[0], block_sizes[1],window_chunks))
+    spatial_thres, temporal_thres = threshold_heuristic([block_sizes[0], block_sizes[1], window_chunks], num_comps = 1, iters=250, percentile_threshold=sim_conf)
     
     ##Load the data you will do blockwise SVD on
     display("Loading Data")
@@ -376,7 +380,7 @@ def localmd_decomposition(dataset_obj, block_sizes, frame_range, max_components=
             pairs.append((k, j))
             subset = data[k:k+block_sizes[0], j:j+block_sizes[1], :].astype(dtype)
             
-            spatial_cropped, temporal_cropped = windowed_pmd(len(frames), subset, max_components, spatial_thres, temporal_thres, max_consec_failures)
+            spatial_cropped, temporal_cropped = windowed_pmd(window_chunks, subset, max_components, spatial_thres, temporal_thres, max_consec_failures)
             total_temporal_fit.append(temporal_cropped)
             
             #Weight the spatial components here
@@ -398,7 +402,6 @@ def localmd_decomposition(dataset_obj, block_sizes, frame_range, max_components=
             row_indices.extend(sparse_row_indices_f)
             spatial_overall_values.extend(spatial_values_f)
             row_number += spatial_cropped.shape[2]
-            
     
     U_r = scipy.sparse.coo_matrix((spatial_overall_values, (column_indices, row_indices)), shape=(data.shape[0]*data.shape[1], row_number))
     V_cropped = np.concatenate(total_temporal_fit, axis = 0)
