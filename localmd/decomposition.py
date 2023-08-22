@@ -312,12 +312,12 @@ def localmd_decomposition(dataset_obj, block_sizes, frame_range, max_components=
         end = load_obj.shape[2]
         frames = [i for i in range(start, end)]
         if frame_range <= window_chunks:
-            display("WARNING: Initializing on less than {} frames, this will lead to limited benefits.".format(window_chunk))
+            display("WARNING: Initializing on less than {} frames, this will lead to limited benefits.".format(window_chunks))
             window_chunks = frame_range
     else:
         if frame_range <= window_chunks:
             if frame_range < window_chunks:
-                display("WARNING: Initializing on less than {} frames, this will lead to limited benefits.".format(window_chunk))
+                display("WARNING: Initializing on less than {} frames, this will lead to limited benefits.".format(window_chunks))
             window_chunks = frame_range
         frames = identify_window_chunks(frame_range, load_obj.shape[2], window_chunks)
     display("We are initializing on a total of {} frames".format(len(frames)))
