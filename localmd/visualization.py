@@ -54,17 +54,20 @@ def temporal_crop(dataset, frames, frame_corrector = None, batch_size = 100):
 
 def generate_PMD_comparison_triptych(dataset, frames, U, R, s, V, mean_img, std_img, data_order, data_shape, dim1_interval, dim2_interval, frame_corrector=None):
     
+    #Step 1: Prune the sparse U matrix 
+    d1, d2 = data_shape[0], data_shape[1]
+    indices_r = np.arange(d1*d2).reshape((d1, d2), order=data_order)
     
-    
-    order = data_order
+    indices_cropped = indices_r[dim1_interval[0]:dim1_interval[1], dim2_interval[0]:dim2_interval[1]].reshape((-1,), order=data_order)
+    d1_p, d2_p = dim1_interval[1] - dim1_interval[0], dim2_interval[1] - dim2_interval[0]
+    U = U[indices_cropped, :]
     V_crop = V[:, frames]
     sV = s[:, None] * V_crop
     RsV = R.dot(sV)
     PMD_movie = U.tocsr().dot(RsV)
-    PMD_movie = PMD_movie.reshape((data_shape[0], data_shape[1], -1), order = data_order)
+    PMD_movie = PMD_movie.reshape((d1_p, d2_p, -1), order = data_order)
     
     #Rescale the PMD movie to match the raw movie (this is important for doing the comparisons)
-    PMD_movie = PMD_movie[dim1_interval[0]:dim1_interval[1], dim2_interval[0]:dim2_interval[1], :]
     PMD_movie = PMD_movie * std_img[dim1_interval[0]:dim1_interval[1], dim2_interval[0]:dim2_interval[1], None] + mean_img[dim1_interval[0]:dim1_interval[1], dim2_interval[0]:dim2_interval[1], None]
     
     original_movie = temporal_crop(dataset, frames, frame_corrector)
