@@ -32,7 +32,7 @@ In our demo script (localmd/demos), you will notice that we save the results of 
 - `U_shape` : Shape of the sparse spatial component matrix.
 - `U_format` : Record indicating the type of sparse representation used to store the spatial component matrix. Currently, this will always be compressed sparse row (CSR).
 - `R` : Mixing weights to recover the orthonormal spatial basis (ie. left singular vectors) when left multiplied by the sparse spatial component matrix.
-- `s` : Vector of singular values (ie. the diagonal of `S`).
+- `s` : Vector of singular values (ie. the diagonal of `S`). Note we only store the diagonal values here. 
 - `Vt` : Orthonormal temporal basis (ie. right singular vectors).
 - `mean_img` : The mean image of the dataset
 - `std_img` : The noise variance image of every pixel of the dataset
@@ -48,6 +48,8 @@ U = scipy.sparse.csr_matrix(
 )
 ```
 
+In the most recent commits we now provide a class (PMDArray) which allows you to interact with the PMD decomposition using array-like functionality (things like PMDArray[:, :, 40] to load the 40-th frame of your movie). See the official_demo.ipynb for more details. 
+
 ## Parameter Documentation
 For users of this method, there are primarily 3 parameters to modify: 
 
@@ -56,4 +58,4 @@ For users of this method, there are primarily 3 parameters to modify:
 
 
 ## Custom Dataformat Support
-The localmd package comes with support for multi-page tiff files. It is also extremely easy to add support for your own custom dataformats (these dataformats can consist of single file or multiple files). Simply provide a concrete implementation of the PMDDataset abstract class (see localmd/dataset.py). This implementation only requires very two functions: (1) A function to return the shape (dimensions) of the data and (2) A function to return arbitrary frames of the data (see ``def get_frames``). 
+The localmd package comes with support for multi-page tiff files. It is also extremely easy to add support for your own custom dataformats (these dataformats can consist of single file or multiple files). Simply provide a concrete implementation of the PMDDataset abstract class (see localmd/dataset.py). This implementation only requires two basic functions: (1) A function to return the shape (dimensions) of the data and (2) A function to return arbitrary frames of the data (see ``def get_frames``). 
