@@ -45,10 +45,17 @@ data = np.load(your_compressed_filename, allow_pickle=True)
 U = scipy.sparse.csr_matrix(
     (data['U_data'], data['U_indices'], data['U_indptr']),
     shape=data['U_shape']
-)
+).tocoo()
+V = data['Vt']
+R = data['R']
+s = data['s']
+mean_img = data['mean_img']
+std_img = data['noise_var_img']
+data_shape = (data['fov_shape'][0], data['fov_shape'][1], V.shape[1])
+data_order = data['fov_order'].item()
 ```
 
-In the most recent commits we now provide a class (PMDArray) which allows you to interact with the PMD decomposition using array-like functionality (things like PMDArray[:, :, 40] to load the 40-th frame of your movie). See the official_demo.ipynb for more details. 
+In the most recent commits we now provide a class (PMDArray) which allows you to interact with the PMD decomposition using array-like functionality (things like PMDArray[:, :, 40] to load the 40-th frame of your movie or PMDArray[20:30, 20:40, :] to spatially crop and interact with small subsets of your data). Of course running something like PMDArray[:, :, :] will expand out the full movie into main memory (which will overwhelm your system if your original data, casted to np.float32, is too large for your RAM). See the official_demo.ipynb for more details. 
 
 ## Parameter Documentation
 For users of this method, there are primarily 3 parameters to modify: 
