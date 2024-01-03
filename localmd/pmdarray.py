@@ -44,10 +44,26 @@ class PMDArray():
     @property
     def shape(self):
         """Array dimensions."""
-        return (self.d1, self.d2, self.T)
+        return (self.T, self.d1, self.d2)
+
+    @property
+    def ndim(self):
+        """Number of dimensions"""
+        return len(self.shape)
     
     def __getitem__(self, key):
         """Returns self[key]."""
+
+        if isinstance(key, (int, np.integer)): 
+            U_used = self.U_sparse
+            implied_fov_shape = (self.d1, self.d2)
+            output = U_used.dot(self.V[:, key]).reshape(implied_fov_shape, order=self.order)
+            output = output * self.var_img + self.mean_img
+
+            return output
+
+        key = (key[1], key[2], key[0])
+            
         if key[0] == slice(None, None, None) and key[1] == slice(None, None, None): #Only slicing rows
             U_used = self.U_sparse
             implied_fov_shape = (self.d1, self.d2)
@@ -60,4 +76,5 @@ class PMDArray():
             output = U_used.dot(self.V[:, key[2]]).reshape(implied_fov_shape + (-1,), order=self.order)
             output = output * self.var_img[(key[0], key[1], None)] + self.mean_img[(key[0], key[1], None)]
 
-        return output.squeeze().astype(self.dtype)
+        return output[..., 0]
+
